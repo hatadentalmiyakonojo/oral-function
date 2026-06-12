@@ -453,6 +453,127 @@ const YEARS = Array.from({length:121},(_,i)=>CURRENT_YEAR-i);
 const pad2 = n => String(n).padStart(2,'0');
 // 指定した年・月の日数（うるう年も自動対応）。未選択なら31日
 function daysInMonth(y, m) { return (y && m) ? new Date(y, m, 0).getDate() : 31; }
+// 和暦（元号）：生年月日入力用。最大年は元号の終わり（現行元号は今年）まで
+const ERAS = [
+  {name:'令和', start:2019},
+  {name:'平成', start:1989, end:2019},
+  {name:'昭和', start:1926, end:1989},
+  {name:'大正', start:1912, end:1926},
+];
+const eraMaxYear = e => (e.end ? e.end - e.start + 1 : CURRENT_YEAR - e.start + 1);
+// 西暦→和暦（境界年は新しい元号側で表示）
+function toWareki(y){
+  for(const e of ERAS){ if(y>=e.start) return {era:e.name, ey:y-e.start+1}; }
+  return {era:'大正', ey:1};
+}
+// 姓名を空白（全角/半角）で分割。空白が無ければ全部を姓に
+function splitName(s){
+  const t=(s||'').trim().replace(/　/g,' ');
+  const i=t.indexOf(' ');
+  return i===-1 ? [t,''] : [t.slice(0,i), t.slice(i+1).trim()];
+}
+// ★保険点数（令和8年6月改定・2026年6月施行）。取り漏れ防止のメモ表示用（画面のみ。管理計画書には印字されない）
+//   次回改定時はここの数値を更新する。当院方針：届出（口管強・口腔機能実地指導料・咬合圧検査）はすべて済み、
+//   細菌定量検査・グルコセンサー（咀嚼能力検査1）は実施しないため表示しない
+const FEE = {
+  pedMgmt1: 90,    // 小児口腔機能管理料1（該当3項目以上）
+  pedMgmt2: 50,    // 小児口腔機能管理料2（該当2項目）
+  aduMgmt1: 90,    // 口腔機能管理料1（対象検査あり）
+  aduMgmt2: 50,    // 口腔機能管理料2（対象検査なし）
+  kokankyo: 50,    // 口腔管理体制強化加算
+  shikan:   90,    // 歯科疾患管理料
+  reha3:    50,    // 歯科口腔リハビリテーション料3（月2回）
+  kinouJisshi: 46, // 口腔機能実地指導料
+  eiseiJisshi: 80, // 歯科衛生実地指導料1
+  testTongue: 140, // 舌圧検査
+  testLip:    100, // 小児口唇閉鎖力検査
+  testBite:   130, // 咬合圧検査1
+  testMoist:  130, // 口腔粘膜湿潤度検査（令和8年新設）
+};
+// 毎月分（管理料・加算・指導訓練）の行。小児/成人で管理料の行だけ差し替える
+function monthlyBillingRows(mgmtRow){
+  return [
+    {label:'管理料・加算（月1回）', rows:[
+      {name:'歯科疾患管理料', detail:'文書提供加算+10点は別途', point:FEE.shikan},
+      mgmtRow,
+      {name:'口腔管理体制強化加算（口管強）', detail:'届出済み・毎月', point:FEE.kokankyo},
+    ]},
+    {label:'指導・訓練（毎月）', rows:[
+      {name:'歯科口腔リハビリテーション料3', detail:'月2回まで・摂食機能療法と同日不可', point:FEE.reha3, times:2},
+      {name:'歯科衛生実地指導料1', detail:'15分以上＋文書提供（特別対応患者は2:100点）', point:FEE.eiseiJisshi},
+      {name:'口腔機能実地指導料', detail:'歯リハ3と指導内容が重複する日は不可', point:FEE.kinouJisshi},
+    ]},
+  ];
+}
+// 算定メモの組み立て（小児）。qualifies=診断成立, dxCount=「食べる・話す」該当数, hasLip/hasTongue=検査入力の有無
+function pedBillingSections(qualifies, dxCount, hasLip, hasTongue){
+  const sections = [];
+  if (qualifies) {
+    const m1 = dxCount >= 3;
+    sections.push(...monthlyBillingRows(
+      {name:`小児口腔機能管理料${m1?'1':'2'}`, detail:m1?`「食べる・話す」${dxCount}項目該当（3項目以上→管理料1）`:'該当2項目→管理料2', point:m1?FEE.pedMgmt1:FEE.pedMgmt2}
+    ));
+  }
+  const tests = [];
+  if (hasTongue) tests.push({name:'舌圧検査', detail:'3月に1回', point:FEE.testTongue});
+  if (hasLip)    tests.push({name:'小児口唇閉鎖力検査', detail:'3月に1回', point:FEE.testLip});
+  if (tests.length) sections.push({label:'実施した検査（3月に1回）', rows:tests});
+  return sections;
+}
+// 算定メモの組み立て（成人）。hasT/hasB/hasM=舌圧・咬合圧・ムーカス入力の有無, ageYears=年齢（50歳未満は要件注記）
+function adultBillingSections(qualifies, hasT, hasB, hasM, ageYears){
+  const sections = [];
+  if (qualifies) {
+    const m1 = hasT || hasB || hasM; // 対象検査（舌圧/咬合圧1/湿潤度）のいずれか実施で管理料1
+    const ageNote = ageYears!=null && ageYears<50 ? '・※50歳未満：全身的な疾患等の要件確認' : '';
+    sections.push(...monthlyBillingRows(
+      {name:`口腔機能管理料${m1?'1':'2'}`, detail:(m1?'対象検査あり→管理料1':'対象検査なし→管理料2')+ageNote, point:m1?FEE.aduMgmt1:FEE.aduMgmt2}
+    ));
+  }
+  const tests = [];
+  if (hasT) tests.push({name:'舌圧検査', detail:'3月に1回', point:FEE.testTongue});
+  if (hasB) tests.push({name:'咬合圧検査1', detail:'3月に1回・咀嚼能力検査1とは3月内排他', point:FEE.testBite});
+  if (hasM) tests.push({name:'口腔粘膜湿潤度検査', detail:'3月に1回・令和8年新設', point:FEE.testMoist});
+  if (tests.length) sections.push({label:'実施した検査（3月に1回）', rows:tests});
+  return sections;
+}
+// 算定点数のメモ表示ボックス。診断成立なら管理料＋検査、未成立でも実施検査だけは表示（疑い病名で算定可）
+function BillingBox({qualifies, sections}){
+  if (!sections || !sections.length) return null;
+  const sum = rows => rows.reduce((s,r)=>s+r.point*(r.times||1),0);
+  const isTestSec = s => s.label.indexOf('検査')!==-1;
+  const monthly = sections.filter(s=>!isTestSec(s)).reduce((s,sec)=>s+sum(sec.rows),0);
+  const tests = sections.filter(isTestSec).reduce((s,sec)=>s+sum(sec.rows),0);
+  return (
+    <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-3">
+      <p className="text-sm font-semibold text-blue-800">💰 算定メモ（令和8年6月改定）
+        {!qualifies && <span className="ml-2 text-xs font-normal text-blue-600">診断未成立 — 検査は「疑い」病名で算定</span>}
+      </p>
+      {sections.map((sec,si)=>(
+        <div key={si}>
+          <p className="text-[11px] font-semibold text-blue-700/70 mb-1">{sec.label}</p>
+          <div className="space-y-1.5">
+            {sec.rows.map((r,i)=>(
+              <div key={i} className="flex items-start justify-between gap-2 text-sm">
+                <div>
+                  <span className="text-gray-700">{r.name}</span>
+                  {r.detail && <p className="text-[10px] text-gray-400">{r.detail}</p>}
+                </div>
+                <span className="font-bold text-blue-700 whitespace-nowrap">{r.point}点{r.times?`×${r.times}`:''}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="border-t border-blue-200 pt-2 text-xs text-blue-800 space-y-0.5">
+        {monthly>0 && <div className="flex justify-between"><span>毎月分 小計（歯リハ3を月2回算定時）</span><span className="font-bold">{monthly}点</span></div>}
+        {tests>0 && <div className="flex justify-between"><span>検査分 小計</span><span className="font-bold">{tests}点</span></div>}
+        {monthly>0 && tests>0 && <div className="flex justify-between"><span>検査月の合計</span><span className="font-bold">{monthly+tests}点</span></div>}
+      </div>
+      <p className="text-[11px] text-gray-400">※取り漏れ防止のメモです（画面表示のみ・印刷されません）。算定可否はレセプトで最終確認してください。</p>
+    </div>
+  );
+}
 
 // ═══════════════════════════════════════════════
 // 機能検査の入力リスト設定（範囲・刻み・初期値＝平均値）
@@ -749,14 +870,16 @@ function computeFnScores(a, tongueCut){
   });
 }
 // レーダーチャート（SVG）。画面・印刷の両方で使用
-function FnRadar({scores}){
+function FnRadar({scores, prev}){
   const W=360, H=300, cx=180, cy=134, R=84;
   const n=scores.length;
   const pt=(i,r)=>{const ang=-Math.PI/2 + i*2*Math.PI/n; return [cx+Math.cos(ang)*r, cy+Math.sin(ang)*r];};
   const poly=(frac)=> scores.map((_,i)=>{const[x,y]=pt(i,R*frac); return (i?'L':'M')+x.toFixed(1)+','+y.toFixed(1);}).join(' ')+'Z';
-  const data = scores.map((s,i)=>{const[x,y]=pt(i,R*s.score/100); return (i?'L':'M')+x.toFixed(1)+','+y.toFixed(1);}).join(' ')+'Z';
+  const dataPath=(arr)=> arr.map((s,i)=>{const[x,y]=pt(i,R*s.score/100); return (i?'L':'M')+x.toFixed(1)+','+y.toFixed(1);}).join(' ')+'Z';
+  const data = dataPath(scores);
   const anyWeak = scores.some(s=>s.weak);
   const youColor = anyWeak ? '#2563eb' : '#16a34a';
+  const youLabel = prev ? '今回' : 'あなた';
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%',maxWidth:'360px',height:'auto'}}>
       {/* 薄いガイド */}
@@ -769,17 +892,21 @@ function FnRadar({scores}){
       {scores.map((s,i)=>{const[x,y]=pt(i,R); return <line key={'a'+i} x1={cx} y1={cy} x2={x} y2={y} stroke="#e5e7eb" strokeWidth="1"/>;})}
       {/* 基準ライン（平均）＝太いオレンジ点線 */}
       <path d={poly(0.5)} fill="none" stroke="#f59e0b" strokeWidth="2.8" strokeDasharray="6,3" strokeLinejoin="round"/>
-      {/* 患者データ */}
+      {/* 前回データ（灰色点線・塗りなし） */}
+      {prev && <path d={dataPath(prev)} fill="none" stroke="#9ca3af" strokeWidth="2" strokeDasharray="3,3" strokeLinejoin="round"/>}
+      {/* 患者データ（今回） */}
       <path d={data} fill={anyWeak?'rgba(37,99,235,0.13)':'rgba(22,163,74,0.15)'} stroke={youColor} strokeWidth="2.4" strokeLinejoin="round"/>
       {scores.map((s,i)=>{const[x,y]=pt(i,R*s.score/100); return <circle key={'d'+i} cx={x} cy={y} r="3.6" fill={s.weak?'#ef4444':'#22c55e'} stroke="#fff" strokeWidth="1.2"/>;})}
       {/* 軸ラベル */}
       {scores.map((s,i)=>{const[x,y]=pt(i,R*1.32); return <text key={'t'+i} x={x} y={y} textAnchor="middle" dominantBaseline="middle" fontSize="11.5" fontWeight={s.weak?'700':'500'} fill={s.weak?'#dc2626':'#374151'}>{s.name}</text>;})}
       {/* 凡例 */}
-      <g transform={`translate(22,${H-16})`}>
-        <line x1="0" y1="-1" x2="24" y2="-1" stroke="#f59e0b" strokeWidth="2.8" strokeDasharray="6,3"/>
-        <text x="29" y="3" fontSize="11.5" fontWeight="700" fill="#b45309">基準ライン（平均）</text>
-        <line x1="172" y1="-1" x2="196" y2="-1" stroke={youColor} strokeWidth="2.4"/>
-        <text x="201" y="3" fontSize="11.5" fontWeight="600" fill={youColor}>あなた</text>
+      <g transform={`translate(${prev?10:22},${H-16})`}>
+        <line x1="0" y1="-1" x2="22" y2="-1" stroke="#f59e0b" strokeWidth="2.8" strokeDasharray="6,3"/>
+        <text x="26" y="3" fontSize="11" fontWeight="700" fill="#b45309">基準ライン（平均）</text>
+        <line x1="153" y1="-1" x2="175" y2="-1" stroke={youColor} strokeWidth="2.4"/>
+        <text x="179" y="3" fontSize="11" fontWeight="600" fill={youColor}>{youLabel}</text>
+        {prev && <line x1="237" y1="-1" x2="259" y2="-1" stroke="#9ca3af" strokeWidth="2" strokeDasharray="3,3"/>}
+        {prev && <text x="263" y="3" fontSize="11" fontWeight="600" fill="#6b7280">前回</text>}
       </g>
     </svg>
   );
@@ -1185,13 +1312,13 @@ function PatientSelect({onSelect,selected}) {
   const [q,setQ] = useState('');
   const filtered = patients.filter(p=>{
     const lq=q.toLowerCase();
-    return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.no.includes(lq);
+    return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.no.includes(lq)||(p.chartNo||'').toLowerCase().includes(lq);
   });
   return (
     <div className="max-w-xl mx-auto px-4 py-6">
       <div className="bg-white rounded-2xl shadow-sm p-6">
         <h2 className="font-semibold text-gray-800 mb-4">患者を選択してください</h2>
-        <input type="search" value={q} onChange={e=>setQ(e.target.value)} placeholder="氏名・フリガナ・患者番号で検索"
+        <input type="search" value={q} onChange={e=>setQ(e.target.value)} placeholder="カルテ番号・氏名・フリガナで検索"
           className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-400"/>
         <div className="space-y-2 max-h-96 overflow-y-auto">
           {filtered.map(p=>{
@@ -1199,7 +1326,9 @@ function PatientSelect({onSelect,selected}) {
             return (
               <button key={p.id} onClick={()=>onSelect(p.id)}
                 className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${p.id===selected?'border-blue-500 bg-blue-50':'border-gray-200 hover:border-blue-300 hover:bg-blue-50'}`}>
-                <span className="text-xs text-gray-400 font-mono mr-2">{p.no}</span>
+                {p.chartNo
+                  ? <span className="text-xs font-mono font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded mr-2">No.{p.chartNo}</span>
+                  : <span className="text-xs text-gray-400 font-mono mr-2">{p.no}</span>}
                 <span className="font-medium">{p.name}</span>
                 <span className="text-xs text-gray-500 ml-2">{age.label}</span>
               </button>
@@ -1500,7 +1629,7 @@ function Patients() {
   const [del, setDel] = useState(null);
   const filtered = patients.filter(p=>{
     const lq=q.toLowerCase();
-    return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.no.toLowerCase().includes(lq);
+    return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.no.toLowerCase().includes(lq)||(p.chartNo||'').toLowerCase().includes(lq);
   });
   return (
     <div className="min-h-screen bg-gray-50">
@@ -1511,7 +1640,7 @@ function Patients() {
         </div>
         <p className="text-sm text-gray-500">登録者数: {patients.length}名</p>
         <input type="search" value={q} onChange={e=>setQ(e.target.value)}
-          placeholder="患者番号、氏名、フリガナで検索"
+          placeholder="カルテ番号、氏名、フリガナで検索"
           className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"/>
         <div className="space-y-2">
           {filtered.map(p=>{
@@ -1524,7 +1653,9 @@ function Patients() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-400 font-mono">{p.no}</span>
+                    {p.chartNo
+                      ? <span className="text-xs font-mono font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">No.{p.chartNo}</span>
+                      : <span className="text-xs text-gray-400 font-mono">{p.no}</span>}
                     <span className="font-semibold text-gray-900 truncate">{p.name}</span>
                   </div>
                   <p className="text-xs text-gray-400">{p.kana}</p>
@@ -1565,33 +1696,49 @@ function PatientForm({patientId}) {
   const nav = useNav();
   const {patients, addPatient, updatePatient, nextNo} = useS();
   const existing = patientId ? patients.find(p=>p.id===patientId) : null;
-  const [form, setForm] = useState({name:existing?.name||'',kana:existing?.kana||'',birth:existing?.birth||'',gender:existing?.gender||'male',notes:existing?.notes||''});
+  // 姓・名は分割保存。旧データ（nameのみ）は空白で自動分割して引き継ぐ
+  const [exSei, exMei] = existing ? (existing.sei!=null ? [existing.sei, existing.mei||''] : splitName(existing.name)) : ['',''];
+  const [exSeiK, exMeiK] = existing ? (existing.seiKana!=null ? [existing.seiKana, existing.meiKana||''] : splitName(existing.kana)) : ['',''];
+  const [form, setForm] = useState({chartNo:existing?.chartNo||'', sei:exSei, mei:exMei, seiKana:exSeiK, meiKana:exMeiK, birth:existing?.birth||'', gender:existing?.gender||'male', notes:existing?.notes||''});
   const [errs, setErrs] = useState({});
   const [saved, setSaved] = useState(false);
   const set = (k,v) => setForm(p=>({...p,[k]:v}));
-  // 生年月日を 年/月/日 の3つに分解して管理（リスト式入力）
-  const parseBirth = s => (s && /^\d{4}-\d{2}-\d{2}$/.test(s)) ? (([y,m,d])=>({y:+y,m:+m,d:+d}))(s.split('-')) : {y:'',m:'',d:''};
-  const [bd, setBd] = useState(parseBirth(existing?.birth||''));
-  const setBirthPart = (part, raw) => {
-    const val = raw==='' ? '' : Number(raw);
-    let next = {...bd, [part]:val};
-    // 月や年を変えて選択中の「日」が月末を超えたら月末に丸める
-    if (next.d) { const max = daysInMonth(next.y, next.m); if (next.d > max) next.d = max; }
-    setBd(next);
-    set('birth', (next.y && next.m && next.d) ? `${next.y}-${pad2(next.m)}-${pad2(next.d)}` : '');
+  // 生年月日を 元号/年/月/日 に分解して管理（和暦リスト式入力）
+  const parseBirth = s => {
+    if(!(s && /^\d{4}-\d{2}-\d{2}$/.test(s))) return {era:'', ey:'', m:'', d:''};
+    const [y,m,d] = s.split('-').map(Number);
+    const w = toWareki(y);
+    return {era:w.era, ey:w.ey, m, d};
   };
-  const agePreview = (bd.y && bd.m && bd.d) ? computeAge(`${bd.y}-${pad2(bd.m)}-${pad2(bd.d)}`) : null;
+  const [bd, setBd] = useState(parseBirth(existing?.birth||''));
+  const eraObj = e => ERAS.find(x=>x.name===e);
+  const westYear = b => { const eo=eraObj(b.era); return (eo && b.ey) ? eo.start + b.ey - 1 : ''; };
+  const setBirthPart = (part, raw) => {
+    let next = {...bd, [part]: (part==='era') ? raw : (raw==='' ? '' : Number(raw))};
+    // 元号を変えたら年がその元号の範囲を超えないよう丸める
+    const eo = eraObj(next.era);
+    if (next.ey && eo && next.ey > eraMaxYear(eo)) next.ey = eraMaxYear(eo);
+    const y = westYear(next);
+    if (next.d && y && next.m) { const max = daysInMonth(y, next.m); if (next.d > max) next.d = max; }
+    setBd(next);
+    set('birth', (y && next.m && next.d) ? `${y}-${pad2(next.m)}-${pad2(next.d)}` : '');
+  };
+  const wy = westYear(bd);
+  const agePreview = (wy && bd.m && bd.d) ? computeAge(`${wy}-${pad2(bd.m)}-${pad2(bd.d)}`) : null;
   const validate = () => {
     const e={};
-    if(!form.name.trim()) e.name='氏名を入力してください';
-    if(!form.kana.trim()) e.kana='フリガナを入力してください';
+    if(!form.sei.trim()) e.sei='姓を入力してください';
+    if(!form.mei.trim()) e.mei='名を入力してください';
+    if(!form.seiKana.trim() || !form.meiKana.trim()) e.kana='フリガナ（セイ・メイ）を入力してください';
     if(!form.birth) e.birth='生年月日を入力してください';
     setErrs(e); return Object.keys(e).length===0;
   };
   const save_ = () => {
     if(!validate()) return;
-    if(existing) updatePatient({...existing,...form});
-    else addPatient({id:generateId(),no:nextNo(),...form,createdAt:new Date().toISOString()});
+    // 表示用のname/kanaは姓名から組み立て（既存コードとの互換のため空白1つで結合）
+    const payload = {...form, name:`${form.sei.trim()} ${form.mei.trim()}`, kana:`${form.seiKana.trim()} ${form.meiKana.trim()}`};
+    if(existing) updatePatient({...existing,...payload});
+    else addPatient({id:generateId(),no:nextNo(),...payload,createdAt:new Date().toISOString()});
     setSaved(true); setTimeout(()=>nav({p:'patients'}),800);
   };
   const ic = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400";
@@ -1602,22 +1749,38 @@ function PatientForm({patientId}) {
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-5">
           {existing && <p className="text-sm text-gray-500">患者番号: <span className="font-mono font-bold text-gray-800">{existing.no}</span></p>}
           <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">カルテ番号</label>
+            <input type="text" value={form.chartNo} onChange={e=>set('chartNo',e.target.value)} placeholder="例）12345" className={ic} inputMode="numeric"/>
+          </div>
+          <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">氏名 *</label>
-            <input type="text" value={form.name} onChange={e=>set('name',e.target.value)} placeholder="例）山田 太郎" className={ic}/>
-            {errs.name && <p className="text-xs text-red-500 mt-1">{errs.name}</p>}
+            <div className="grid grid-cols-2 gap-3">
+              <input type="text" value={form.sei} onChange={e=>set('sei',e.target.value)} placeholder="姓）山田" className={ic}/>
+              <input type="text" value={form.mei} onChange={e=>set('mei',e.target.value)} placeholder="名）太郎" className={ic}/>
+            </div>
+            {(errs.sei||errs.mei) && <p className="text-xs text-red-500 mt-1">{errs.sei||errs.mei}</p>}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">フリガナ *</label>
-            <input type="text" value={form.kana} onChange={e=>set('kana',e.target.value)} placeholder="例）ヤマダ タロウ" className={ic}/>
+            <div className="grid grid-cols-2 gap-3">
+              <input type="text" value={form.seiKana} onChange={e=>set('seiKana',e.target.value)} placeholder="セイ）ヤマダ" className={ic}/>
+              <input type="text" value={form.meiKana} onChange={e=>set('meiKana',e.target.value)} placeholder="メイ）タロウ" className={ic}/>
+            </div>
             {errs.kana && <p className="text-xs text-red-500 mt-1">{errs.kana}</p>}
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">生年月日 *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">生年月日（和暦）*</label>
             <div className="flex items-stretch gap-2">
-              <div className="flex items-center gap-1 flex-[1.4]">
-                <select value={bd.y} onChange={e=>setBirthPart('y',e.target.value)} className={`${ic} bg-white`}>
-                  <option value="">----</option>
-                  {YEARS.map(y=><option key={y} value={y}>{y}</option>)}
+              <div className="flex items-center flex-[1.1]">
+                <select value={bd.era} onChange={e=>setBirthPart('era',e.target.value)} className={`${ic} bg-white`}>
+                  <option value="">元号</option>
+                  {ERAS.map(e=><option key={e.name} value={e.name}>{e.name}</option>)}
+                </select>
+              </div>
+              <div className="flex items-center gap-1 flex-1">
+                <select value={bd.ey} onChange={e=>setBirthPart('ey',e.target.value)} className={`${ic} bg-white`} disabled={!bd.era}>
+                  <option value="">--</option>
+                  {bd.era && Array.from({length:eraMaxYear(eraObj(bd.era))},(_,i)=>i+1).map(y=><option key={y} value={y}>{y===1?'元':y}</option>)}
                 </select>
                 <span className="text-sm text-gray-500 flex-shrink-0">年</span>
               </div>
@@ -1631,12 +1794,13 @@ function PatientForm({patientId}) {
               <div className="flex items-center gap-1 flex-1">
                 <select value={bd.d} onChange={e=>setBirthPart('d',e.target.value)} className={`${ic} bg-white`}>
                   <option value="">--</option>
-                  {Array.from({length:daysInMonth(bd.y,bd.m)},(_,i)=>i+1).map(d=><option key={d} value={d}>{d}</option>)}
+                  {Array.from({length:daysInMonth(wy,bd.m)},(_,i)=>i+1).map(d=><option key={d} value={d}>{d}</option>)}
                 </select>
                 <span className="text-sm text-gray-500 flex-shrink-0">日</span>
               </div>
             </div>
-            {agePreview && <p className="text-xs text-blue-600 mt-1.5 font-medium">📅 現在 {agePreview.label}（{agePreview.years<18?'👶 発達不全症 対象':'👴 低下症 対象'}）</p>}
+            {wy && <p className="text-xs text-gray-400 mt-1">西暦 {wy}年{bd.m?` ${bd.m}月`:''}{bd.d?` ${bd.d}日`:''}</p>}
+            {agePreview && <p className="text-xs text-blue-600 mt-1 font-medium">📅 現在 {agePreview.label}（{agePreview.years<18?'👶 発達不全症 対象':'👴 低下症 対象'}）</p>}
             {errs.birth && <p className="text-xs text-red-500 mt-1">{errs.birth}</p>}
           </div>
           <div>
@@ -1670,13 +1834,13 @@ const PED_STEPS = [{key:'questionnaire',label:'問診・検査'},{key:'scoring',
 
 function PediatricFlow({patientId:initPid}) {
   const nav = useNav();
-  const {patients, addAssessment, updateAssessment} = useS();
+  const {patients, assessments, addAssessment, updateAssessment} = useS();
   const [step, setStep] = useState(initPid?'questionnaire':'select');
   const [pid, setPid] = useState(initPid||'');
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
   const [checkedC, setCheckedC] = useState([]);
-  const [lipForce, setLipForce] = useState('');
-  const [tonguePres, setTonguePres] = useState('');
+  const [lip3, setLip3] = useState(['','','']); // りっぷるくん3回測定。平均が測定値
+  const [tongue3, setTongue3] = useState(['','','']); // JMS舌圧3回測定。平均が測定値
   const [height, setHeight] = useState('');
   const [weight, setWeight] = useState('');
   const [notes, setNotes] = useState('');
@@ -1694,6 +1858,14 @@ function PediatricFlow({patientId:initPid}) {
   const bodyIndex = computeBodyIndex(age?age.years:null, height, weight); // 6歳未満カウプ/6歳以上ローレル
   const lipNorm = lipForceNorm(age?age.years:null, patient?patient.gender:null); // 年齢性別の口唇閉鎖力標準値
   const tongueNorm = pedTongueNorm(age?age.years:null);                          // 年齢別の舌圧cut-off
+  // りっぷるくん：入力済みの回の平均が測定値（小数1位）。1回でも入っていれば算出
+  const lip3nums = lip3.map(parseFloat).filter(x=>!isNaN(x));
+  const lipForce = lip3nums.length ? (Math.round(lip3nums.reduce((a,b)=>a+b,0)/lip3nums.length*10)/10).toFixed(1) : '';
+  const setLip = (i,v) => setLip3(p=>{const n=[...p];n[i]=v;return n;});
+  // JMS舌圧：入力済みの回の平均が測定値（小数1位）
+  const tongue3nums = tongue3.map(parseFloat).filter(x=>!isNaN(x));
+  const tonguePres = tongue3nums.length ? (Math.round(tongue3nums.reduce((a,b)=>a+b,0)/tongue3nums.length*10)/10).toFixed(1) : '';
+  const setTongue = (i,v) => setTongue3(p=>{const n=[...p];n[i]=v;return n;});
   const lipLow = lipForce!=='' && lipNorm && parseFloat(lipForce) <= lipNorm.minus1sd;       // -1SD以下で不足
   const tongueLow = tonguePres!=='' && tongueNorm && parseFloat(tonguePres) <= tongueNorm.cutoff; // cut-off値以下で低舌圧
   const scoring = useMemo(()=>computePediatricScoring(checkedC, cItems),[checkedC, cItems]);
@@ -1702,23 +1874,33 @@ function PediatricFlow({patientId:initPid}) {
   const toggleC = id => setCheckedC(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
   const toggleGroup = g => setCollapsed(p=>{const n=new Set(p);n.has(g)?n.delete(g):n.add(g);return n;});
 
-  // 患者が決まったら、機能検査・身体測定の初期値をその年齢・性別の平均値にセット（選びやすさ用）
+  // 前回の評価（同一患者の小児評価のうち最新。今セッションで保存した分は除く）
+  const prevPed = useMemo(()=>{
+    return assessments
+      .filter(x=>x.patientId===pid && x.type==='pediatric' && x.id!==savedId)
+      .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
+  },[assessments, pid, savedId]);
+
+  // 患者が決まったら、検査値の初期値をセット：前回値があれば前回値、なければ年齢・性別の平均値
   useEffect(()=>{
-    if(!patient || !age) return;
+    if(!patient || !age || savedId) return;
     const yrs = age.years;
     const ln = lipForceNorm(yrs, patient.gender);   // 口唇閉鎖力の年齢性別平均
     const tn = pedTongueNorm(yrs);                   // 最大舌圧の年齢別平均
     const gr = growthAvg(yrs, patient.gender);       // 身長・体重の年齢性別平均
-    setLipForce(ln ? snapToSpec('lipForce', ln.mean) : '');
-    setTonguePres(tn ? snapToSpec('pedTongue', tn.mean) : '');
-    setHeight(gr ? snapToSpec('pedHeight', gr.h) : '');
-    setWeight(gr ? snapToSpec('pedWeight', gr.w) : '');
+    const pv = k => prevPed && prevPed[k]!=='' && prevPed[k]!=null ? parseFloat(prevPed[k]) : null;
+    const lipStart = pv('lipClosureForce')!=null ? snapToSpec('lipForce', pv('lipClosureForce')) : (ln ? snapToSpec('lipForce', ln.mean) : '');
+    setLip3([lipStart, lipStart, lipStart]); // 3回分とも開始値をプリセット（各回を実測値に調整）
+    const tongueStart = pv('maxTonguePressure')!=null ? snapToSpec('pedTongue', pv('maxTonguePressure')) : (tn ? snapToSpec('pedTongue', tn.mean) : '');
+    setTongue3([tongueStart, tongueStart, tongueStart]); // 3回分とも開始値をプリセット
+    setHeight(pv('height')!=null ? snapToSpec('pedHeight', pv('height')) : (gr ? snapToSpec('pedHeight', gr.h) : ''));
+    setWeight(pv('weight')!=null ? snapToSpec('pedWeight', pv('weight')) : (gr ? snapToSpec('pedWeight', gr.w) : ''));
   }, [pid]);
 
   const doSave = () => {
     const a = {id:savedId||generateId(),patientId:pid,date:new Date().toISOString(),type:'pediatric',
       phase:isPreWeaning?'pre':'post',
-      checkedCItems:checkedC,lipClosureForce:lipForce,maxTonguePressure:tonguePres,
+      checkedCItems:checkedC,lipClosureForce:lipForce,lipForces3:lip3,maxTonguePressure:tonguePres,tonguePres3:tongue3,
       lipLow,tongueLow,height,weight,notes,scoring,diagnosis:{matchedPatterns:diagnosis}};
     savedId ? updateAssessment(a) : addAssessment(a);
     if(!savedId) setSavedId(a.id);
@@ -1788,14 +1970,36 @@ function PediatricFlow({patientId:initPid}) {
                           checked={checkedC.includes(item.id)} onChange={()=>toggleC(item.id)}/>
                         {!isPreWeaning && item.id==='C-10' && (
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
-                            <SelectNum label="🔬 口唇閉鎖力検査" hint={lipNorm?`りっぷるくん / ${lipNorm.age}歳${lipNorm.gender==='f'?'女':'男'} 平均${lipNorm.mean}・-1SD ${lipNorm.minus1sd}N`:'りっぷるくん'} unit="N" specKey="lipForce" value={lipForce} onChange={setLipForce}
-                              abnormal={lipLow} abnormalText={lipNorm?`-1SD以下（≦${lipNorm.minus1sd}N）→ 口唇閉鎖力不足`:'基準値以下'}/>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-sm font-medium text-gray-700">🔬 口唇閉鎖力検査（りっぷるくん・3回測定）</label>
+                            </div>
+                            <p className="text-xs text-gray-400">{lipNorm?`${lipNorm.age}歳${lipNorm.gender==='f'?'女':'男'} 平均${lipNorm.mean}・-1SD ${lipNorm.minus1sd}N`:'りっぷるくん'}{prevPed&&prevPed.lipClosureForce?`／前回 ${prevPed.lipClosureForce}N`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 機器を水平に引っ張り、抜けた瞬間の最大値</p>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)}/>
+                              ))}
+                            </div>
+                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipLow?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                              平均（測定値）：<span className="font-bold text-base">{lipForce!==''?lipForce:'—'}</span> N{lip3nums.length>0&&lip3nums.length<3?`（${lip3nums.length}回入力）`:''}
+                              {lipLow && <span className="ml-2 text-xs">⚠ -1SD以下（≦{lipNorm.minus1sd}N）→ 口唇閉鎖力不足</span>}
+                            </div>
                           </div>
                         )}
                         {!isPreWeaning && item.id==='C-17' && (
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
-                            <SelectNum label="🔬 舌圧検査" hint={tongueNorm?`JMS舌圧計 / ${tongueNorm.age}歳 平均${tongueNorm.mean}・cut-off ${tongueNorm.cutoff}kPa`:'JMS舌圧計'} unit="kPa" specKey="pedTongue" value={tonguePres} onChange={setTonguePres}
-                              abnormal={tongueLow} abnormalText={tongueNorm?`cut-off値以下（≦${tongueNorm.cutoff}kPa）→ 低舌圧`:'低舌圧'}/>
+                            <label className="text-sm font-medium text-gray-700">🔬 舌圧検査（JMS舌圧計・3回測定）</label>
+                            <p className="text-xs text-gray-400">{tongueNorm?`${tongueNorm.age}歳 平均${tongueNorm.mean}・cut-off ${tongueNorm.cutoff}kPa`:'JMS舌圧計'}{prevPed&&prevPed.maxTonguePressure?`／前回 ${prevPed.maxTonguePressure}kPa`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)}/>
+                              ))}
+                            </div>
+                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueLow?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                              平均（測定値）：<span className="font-bold text-base">{tonguePres!==''?tonguePres:'—'}</span> kPa{tongue3nums.length>0&&tongue3nums.length<3?`（${tongue3nums.length}回入力）`:''}
+                              {tongueLow && <span className="ml-2 text-xs">⚠ cut-off値以下（≦{tongueNorm.cutoff}kPa）→ 低舌圧</span>}
+                            </div>
                           </div>
                         )}
                         {item.cat==='栄養（体格）' && (
@@ -1816,11 +2020,6 @@ function PediatricFlow({patientId:initPid}) {
                 </div>
               );
             })}
-            <div className="bg-white rounded-2xl shadow-sm p-6">
-              <h2 className="font-semibold text-gray-800 mb-3">📝 メモ・特記事項</h2>
-              <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3} placeholder="検査中の様子など"
-                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"/>
-            </div>
             <NavBtns onBack={back} onNext={next} nextLabel="算定要件の判定へ →"/>
           </div>
         )}
@@ -1842,6 +2041,7 @@ function PediatricFlow({patientId:initPid}) {
               <div className={`rounded-xl p-4 text-sm font-semibold ${scoring.qualifies?'bg-green-50 text-green-700 border border-green-200':'bg-red-50 text-red-700 border border-red-200'}`}>
                 {scoring.qualifies?'✓ 口腔機能発達不全症：診断基準を満たしています':'✗ 口腔機能発達不全症：診断基準を満たしていません'}
               </div>
+              <BillingBox qualifies={scoring.qualifies} sections={pedBillingSections(scoring.qualifies, scoring.dxCount, lipForce!=='', tonguePres!=='')}/>
               <p className="text-xs text-gray-400">出典：日本歯科医学会「口腔機能発達不全症に関する基本的な考え方」令和6年3月</p>
             </div>
             {diagnosis.length>0 && (
@@ -1870,6 +2070,13 @@ function PediatricFlow({patientId:initPid}) {
                 })}
               </div>
             )}
+            <div className="bg-white rounded-2xl shadow-sm p-6">
+              <h2 className="font-semibold text-gray-800 mb-3">📝 メモ・管理方針</h2>
+              <p className="text-xs text-gray-400 mb-2">判定結果を踏まえた管理方針を記入（管理計画書に印字されます）</p>
+              <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3} placeholder="検査中の様子・管理方針など"
+                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"/>
+              <NoteTemplates kind="pediatric" notes={notes} setNotes={setNotes}/>
+            </div>
             <NavBtns onBack={back} onNext={next} nextLabel="トレーニング処方へ →"/>
           </div>
         )}
@@ -2018,7 +2225,7 @@ const EAT10_QUESTIONS = [
   '飲み込むことはストレスが多い',
 ];
 // 成人の各検査の初期値。TCIは舌マップ・EAT-10は質問票から自動計算。当院で通常検査しない項目（細菌数・サクソン・グルコース）は空欄＝未検査スタート
-const EMPTY_M = {tciScore:'50',tciZones:[1,1,1,1,1,1,1,1,1],bacteriaLevel:'',oralMoisture:MEAS_DEF.oralMoisture,saxonTest:'',biteForce:MEAS_DEF.biteForce,remainingTeeth:MEAS_DEF.remainingTeeth,biteFilter:true,ddk_pa:MEAS_DEF.ddk_pa,ddk_ta:MEAS_DEF.ddk_ta,ddk_ka:MEAS_DEF.ddk_ka,maxTonguePressure:MEAS_DEF.maxTonguePressure,masticationScore:'',eatScore:'',eatAnswers:Array(10).fill(null),rsst:''};
+const EMPTY_M = {tciScore:'50',tciZones:[1,1,1,1,1,1,1,1,1],bacteriaLevel:'',oralMoisture:MEAS_DEF.oralMoisture,saxonTest:'',biteForce:MEAS_DEF.biteForce,remainingTeeth:MEAS_DEF.remainingTeeth,biteFilter:true,ddk_pa:MEAS_DEF.ddk_pa,ddk_ta:MEAS_DEF.ddk_ta,ddk_ka:MEAS_DEF.ddk_ka,tonguePres3:[MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure],maxTonguePressure:MEAS_DEF.maxTonguePressure,masticationScore:'',eatScore:'',eatAnswers:Array(10).fill(null),rsst:''};
 
 // EAT-10 質問票：各質問を0〜4でタップ。合計を自動計算し3点以上で嚥下機能低下の疑い
 function EAT10({answers, onChange}) {
@@ -2049,7 +2256,7 @@ function EAT10({answers, onChange}) {
 
 function AdultFlow({patientId:initPid}) {
   const nav = useNav();
-  const {patients, addAssessment, updateAssessment} = useS();
+  const {patients, assessments, addAssessment, updateAssessment} = useS();
   const [step,setStep] = useState(initPid?'litems':'select');
   const [pid,setPid] = useState(initPid||'');
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
@@ -2061,6 +2268,24 @@ function AdultFlow({patientId:initPid}) {
   const patient = patients.find(p=>p.id===pid);
   const age = patient ? computeAge(patient.birth) : null;
   const tongueCut = adultTongueCutoff(age?age.years:null, patient?patient.gender:null); // 年齢性別の舌圧cut-off
+  // 前回の評価（同一患者の成人評価のうち最新。今セッションで保存した分は除く）
+  const prevA = useMemo(()=>{
+    return assessments
+      .filter(x=>x.patientId===pid && x.type==='adult' && x.id!==savedId)
+      .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
+  },[assessments, pid, savedId]);
+  // 患者が決まったら、前回の検査値をプリセット（再評価の入力を高速化）。前回が無ければ既定値のまま
+  useEffect(()=>{
+    if(!pid || !prevA || savedId) return;
+    const pm = prevA.measurements||{};
+    const merged = {...EMPTY_M, ...pm};
+    // 旧データ（3回測定なし）から再評価する場合は、前回の平均値を3回分にプリセット
+    if(!Array.isArray(pm.tonguePres3) && pm.maxTonguePressure!=null && pm.maxTonguePressure!==''){
+      const snap = snapToSpec('maxTonguePressure', parseFloat(pm.maxTonguePressure));
+      merged.tonguePres3 = [snap, snap, snap];
+    }
+    setM(merged);
+  },[pid]);
   const measL = useMemo(()=>computeMeasurementLItems(m, tongueCut),[m, tongueCut]);
   const allL = useMemo(()=>[...new Set([...measL,...manualL])],[measL,manualL]);
   const diag = useMemo(()=>{
@@ -2071,6 +2296,13 @@ function AdultFlow({patientId:initPid}) {
 
   const toggleML = id => setManualL(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
   const setMv = (k,v) => setM(p=>({...p,[k]:v}));
+  // 最大舌圧：JMS舌圧計で3回測定し、入力済みの回の平均を測定値とする（りっぷるくんと同方式）
+  const setTongue3 = (i,v) => setM(p=>{
+    const arr=[...(p.tonguePres3||['','',''])]; arr[i]=v;
+    const nums=arr.map(parseFloat).filter(x=>!isNaN(x));
+    const avg=nums.length?(Math.round(nums.reduce((a,b)=>a+b,0)/nums.length*10)/10).toFixed(1):'';
+    return {...p, tonguePres3:arr, maxTonguePressure:avg};
+  });
   // 舌マップ（9分割）からTCI%を自動計算。null=未検査
   const setTciZones = z => setM(p=>({...p, tciZones:z, tciScore: z ? String(Math.round(z.reduce((a,b)=>a+b,0)/18*100)) : ''}));
   // EAT-10：質問iの回答を更新し、合計をeatScoreに自動反映
@@ -2161,7 +2393,19 @@ function AdultFlow({patientId:initPid}) {
                           {item.id==='L-4' && <div className="ml-7 grid grid-cols-3 gap-3">
                             <MeasInput label="DDK-パ" unit="回/秒" mkey="ddk_pa" thr={6} m={m} setM={setMv}/><MeasInput label="DDK-タ" unit="回/秒" mkey="ddk_ta" thr={6} m={m} setM={setMv}/><MeasInput label="DDK-カ" unit="回/秒" mkey="ddk_ka" thr={6} m={m} setM={setMv}/>
                           </div>}
-                          {item.id==='L-5' && <div className="ml-7"><MeasInput label={`最大舌圧（目安≧${tongueCut}kPa）`} unit="kPa" mkey="maxTonguePressure" thr={tongueCut} m={m} setM={setMv}/></div>}
+                          {item.id==='L-5' && <div className="ml-7 space-y-2">
+                            <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／目安≧{tongueCut}kPa）{prevA&&prevA.measurements&&prevA.measurements.maxTonguePressure?`／前回 ${prevA.measurements.maxTonguePressure}kPa`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)}/>
+                              ))}
+                            </div>
+                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${m.maxTonguePressure===''?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                              平均（測定値）：<span className="font-bold text-base">{m.maxTonguePressure!==''?m.maxTonguePressure:'—'}</span> kPa{(()=>{const n=(m.tonguePres3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}
+                              {m.maxTonguePressure!=='' && parseFloat(m.maxTonguePressure)<tongueCut && <span className="ml-2 text-xs">⚠ 目安未満（＜{tongueCut}kPa）→ 低舌圧</span>}
+                            </div>
+                          </div>}
                           {item.id==='L-6' && <div className="ml-7"><MeasInput label="グルコース濃度" unit="mg/dL" mkey="masticationScore" thr={100} m={m} setM={setMv}/></div>}
                           {item.id==='L-7' && <div className="ml-7 space-y-3">
                             <p className="text-xs font-medium text-gray-600">EAT-10（嚥下スクリーニング質問票）</p>
@@ -2183,11 +2427,6 @@ function AdultFlow({patientId:initPid}) {
                 </div>
               );
             })}
-            <div className="bg-white rounded-2xl shadow-sm p-5">
-              <h3 className="font-semibold text-gray-800 mb-2">📝 メモ</h3>
-              <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3} placeholder="所見・特記事項など"
-                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"/>
-            </div>
             <NavBtns onBack={()=>setStep('select')} onNext={()=>setStep('diagnosis')} nextLabel="診断結果へ →"/>
           </div>
         )}
@@ -2197,6 +2436,14 @@ function AdultFlow({patientId:initPid}) {
             <div className={`rounded-2xl p-5 border-2 text-center font-semibold ${diag.qualifies?'bg-red-50 border-red-300 text-red-800':'bg-green-50 border-green-300 text-green-800'}`}>
               <p className="text-lg">{diag.qualifies?'⚠ 口腔機能低下症の疑いがあります':'✓ 口腔機能低下症の算定要件を満たしていません'}</p>
               <p className="text-sm font-normal mt-1">{diag.lItemCount}項目が該当（3項目以上で算定要件を満たします）</p>
+            </div>
+            <BillingBox qualifies={diag.qualifies} sections={adultBillingSections(diag.qualifies, m.maxTonguePressure!=='', m.biteForce!=='', m.oralMoisture!=='', age?age.years:null)}/>
+            <div className="bg-white rounded-2xl shadow-sm p-5">
+              <h2 className="font-semibold text-gray-800 mb-1">📊 お口の機能バランス{prevA && <span className="text-xs font-normal text-gray-400 ml-2">前回（{formatDate(prevA.date)}）との比較</span>}</h2>
+              <div className="flex justify-center">
+                <FnRadar scores={computeFnScores({measurements:m, checkedLItems:allL}, tongueCut)}
+                  prev={prevA ? computeFnScores(prevA, tongueCut) : null}/>
+              </div>
             </div>
             <div className="bg-white rounded-2xl shadow-sm p-5 space-y-3">
               <h2 className="font-semibold text-gray-800">該当L項目（{allL.length}/7）</h2>
@@ -2244,6 +2491,13 @@ function AdultFlow({patientId:initPid}) {
                 </div>
               );
             })()}
+            <div className="bg-white rounded-2xl shadow-sm p-5">
+              <h3 className="font-semibold text-gray-800 mb-2">📝 メモ・管理方針</h3>
+              <p className="text-xs text-gray-400 mb-2">診断結果を踏まえた管理方針を記入（管理計画書に印字されます）</p>
+              <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3} placeholder="所見・管理方針など"
+                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"/>
+              <NoteTemplates kind="adult" notes={notes} setNotes={setNotes}/>
+            </div>
             <div className="flex gap-3">
               <Btn onClick={()=>setStep('litems')} variant="secondary"><span>◀</span> 戻る</Btn>
               <Btn onClick={()=>{const id=doSave();nav({p:'print',assessmentId:id});}} cls="flex-1">🖨️ 印刷プレビューへ →</Btn>
@@ -2311,19 +2565,33 @@ function History({patientId}) {
 // ═══════════════════════════════════════════════
 function PrintPreview({assessmentId}) {
   const nav = useNav();
-  const {getAssessment, getPatient, clinic} = useS();
+  const {getAssessment, getPatient, clinic, assessments} = useS();
+  const [docType, setDocType] = useState('patient'); // 'patient'=患者配布用 / 'plan'=管理計画書（院内用）
   const a = getAssessment(assessmentId);
   const patient = a ? getPatient(a.patientId) : null;
   if(!a||!patient) return <div className="flex items-center justify-center min-h-screen text-gray-500">評価データが見つかりません</div>;
   const age = computeAge(patient.birth);
   const isPed = a.type==='pediatric';
+  // 前回の評価（同一患者・同一種別・今回より前の日付で最新）
+  const prevA = assessments
+    .filter(x=>x.patientId===a.patientId && x.type===a.type && x.id!==a.id && new Date(x.date)<new Date(a.date))
+    .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
+  // 生年月日の和暦表示（管理計画書用）
+  const [by,bm,bdd] = patient.birth.split('-').map(Number);
+  const bw = toWareki(by);
+  const birthWareki = `${bw.era}${bw.ey===1?'元':bw.ey}年${bm}月${bdd}日`;
+  const isPlan = docType==='plan';
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <div className="bg-white shadow-sm px-6 py-4 flex items-center gap-4 no-print">
+      <div className="bg-white shadow-sm px-6 py-4 flex items-center gap-3 flex-wrap no-print">
         <button onClick={()=>nav(isPed?{p:'pediatric',patientId:patient.id,assessmentId}:{p:'adult',patientId:patient.id,assessmentId})}
           className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ {isPed?'トレーニング処方に戻る':'L項目・検査に戻る'}</button>
         <h1 className="text-lg font-bold text-gray-900 flex-1">印刷プレビュー</h1>
+        <div className="flex rounded-xl overflow-hidden border border-gray-200">
+          <button onClick={()=>setDocType('patient')} className={`px-4 py-2 text-sm font-medium ${!isPlan?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>👨‍👩‍👧 患者配布用</button>
+          <button onClick={()=>setDocType('plan')} className={`px-4 py-2 text-sm font-medium ${isPlan?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>📋 管理計画書</button>
+        </div>
         <button onClick={()=>window.print()} className="flex items-center gap-2 bg-blue-600 text-white px-5 py-2.5 rounded-xl font-medium hover:bg-blue-700">🖨️ 印刷する</button>
         <button onClick={()=>nav({p:'home'})} className="flex items-center gap-2 bg-gray-100 text-gray-700 px-4 py-2.5 rounded-xl text-sm hover:bg-gray-200">🏠 最初に戻る</button>
       </div>
@@ -2344,17 +2612,28 @@ function PrintPreview({assessmentId}) {
           </div>
         )}
         <div style={{textAlign:'center',marginBottom:'12px'}}>
-          <h1 style={{fontSize:'18px',fontWeight:'700',color:'#1e40af',marginBottom:'2px'}}>お口の機能チェック結果のお知らせ</h1>
-          <p style={{fontSize:'11px',color:'#666'}}>{isPed?'口腔機能発達不全症の評価とご家庭でのトレーニング':'口腔機能低下症の評価と今後の管理方針'}</p>
-          <div style={{height:'2px',background:'#1d4ed8',margin:'6px 48px 0'}}/>
+          <h1 style={{fontSize:'18px',fontWeight:'700',color:isPlan?'#111':'#1e40af',marginBottom:'2px'}}>
+            {isPlan ? `${isPed?'口腔機能発達不全症':'口腔機能低下症'} 管理計画書` : 'お口の機能チェック結果のお知らせ'}
+          </h1>
+          <p style={{fontSize:'11px',color:'#666'}}>{isPlan ? '院内保管・カルテ添付用' : (isPed?'口腔機能発達不全症の評価とご家庭でのトレーニング':'口腔機能低下症の評価と今後の管理方針')}</p>
+          <div style={{height:'2px',background:isPlan?'#374151':'#1d4ed8',margin:'6px 48px 0'}}/>
         </div>
-        <div style={{display:'flex',gap:'24px',marginBottom:'12px',background:'#f8fafc',borderRadius:'10px',padding:'8px 14px'}}>
-          {[['お名前',`${patient.name} さん`],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日',formatDate(a.date)]].map(([l,v])=>(
+        <div style={{display:'flex',gap:'18px',marginBottom:'12px',background:'#f8fafc',borderRadius:'10px',padding:'8px 14px',flexWrap:'wrap'}}>
+          {(isPlan
+            ? [['カルテNo', patient.chartNo||'—'],['氏名',patient.name],['生年月日',birthWareki],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日（指導日）',formatDate(a.date)]]
+            : [['お名前',`${patient.name} さん`],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日',formatDate(a.date)]]
+          ).map(([l,v])=>(
             <div key={l}><p style={{fontSize:'10px',color:'#888'}}>{l}</p><p style={{fontWeight:'600',color:'#111',fontSize:'13px'}}>{v}</p></div>
           ))}
         </div>
 
-        {isPed ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name}/> : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)}/>}
+        {isPlan
+          ? (isPed
+              ? <PlanPediatric a={a} patient={patient} ageYears={age.years} prev={prevA} clinic={clinic}/>
+              : <PlanAdult a={a} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA} clinic={clinic}/>)
+          : (isPed
+              ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name} prev={prevA}/>
+              : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA}/>)}
 
         <div style={{marginTop:'14px',paddingTop:'8px',borderTop:'1px solid #e5e7eb',fontSize:'10px',color:'#aaa',display:'flex',justifyContent:'space-between'}}>
           <span>口腔機能管理アプリ v1.0.0</span>
@@ -2365,12 +2644,19 @@ function PrintPreview({assessmentId}) {
   );
 }
 
-function PrintPediatric({a, ageYears, patientName}) {
+function PrintPediatric({a, ageYears, patientName, prev}) {
   const {diagnosis} = a;
   const patterns = (diagnosis?.matchedPatterns||[]);
   const bodyIdx = (a.height && a.weight) ? computeBodyIndex(ageYears, a.height, a.weight) : null;
   const trainings = prescribeTrainings(patterns);
   const showAiube = trainings.some(t=>t.name.includes('あいうべ'));
+  // 前回値との比較コメント（前回より上がっていれば成長を褒める）
+  const trend = (cur, pv, unit) => {
+    if(!prev || pv==null || pv==='' || cur==null || cur==='') return null;
+    const d = parseFloat(cur)-parseFloat(pv);
+    if(isNaN(d)) return null;
+    return `前回 ${pv}${unit} → ${d>0?'アップ！':d<0?'今回はひかえめ':'キープ'}`;
+  };
   return (
     <div>
       {/* ─── 表面：評価結果 ─── */}
@@ -2389,13 +2675,13 @@ function PrintPediatric({a, ageYears, patientName}) {
       {(a.lipClosureForce||a.maxTonguePressure||bodyIdx) && (
         <Section title="検査結果">
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px'}}>
-            {a.lipClosureForce && <MCard label="くちびるを閉じる力" value={a.lipClosureForce} unit="N" abn={!!a.lipLow} ref_={a.lipLow?'平均より弱めです':'平均的な力です'}/>}
-            {a.maxTonguePressure && <MCard label="舌の力（舌圧）" value={a.maxTonguePressure} unit="kPa" abn={!!a.tongueLow} ref_={a.tongueLow?'平均より弱めです':'平均的な力です'}/>}
+            {a.lipClosureForce && <MCard label="くちびるを閉じる力" value={a.lipClosureForce} unit="N" abn={!!a.lipLow} ref_={trend(a.lipClosureForce, prev&&prev.lipClosureForce, 'N') || (a.lipLow?'平均より弱めです':'平均的な力です')}/>}
+            {a.maxTonguePressure && <MCard label="舌の力（舌圧）" value={a.maxTonguePressure} unit="kPa" abn={!!a.tongueLow} ref_={trend(a.maxTonguePressure, prev&&prev.maxTonguePressure, 'kPa') || (a.tongueLow?'平均より弱めです':'平均的な力です')}/>}
             {bodyIdx && <MCard label={`体格（${a.height}cm・${a.weight}kg）`} value={bodyIdx.value} unit="" note={bodyIdx.label} abn={bodyIdx.abnormal} ref_={bodyIdx.abnormal?'少し注意しましょう':'良好です'}/>}
           </div>
         </Section>
       )}
-      {a.notes && <Section title="メモ・所見"><p style={{fontSize:'12px',color:'#374151',background:'#f8fafc',borderRadius:'10px',padding:'8px 12px'}}>{a.notes}</p></Section>}
+      {a.notes && <Section title="メモ・所見"><p style={{fontSize:'12px',color:'#374151',background:'#f8fafc',borderRadius:'10px',padding:'8px 12px',whiteSpace:'pre-line'}}>{a.notes}</p></Section>}
 
       {/* ─── 裏面：ご家庭でのトレーニング ─── */}
       {trainings.length>0 && (
@@ -2437,11 +2723,12 @@ function PrintPediatric({a, ageYears, patientName}) {
   );
 }
 
-function PrintAdult({a, patientName, tongueCut}) {
+function PrintAdult({a, patientName, tongueCut, prev}) {
   const {diagnosis} = a;
   const ngCount = diagnosis?.lItemCount||0;
   const trainings = prescribeAdultTrainings(a.checkedLItems||[], a.measurements||{});
   const scores = computeFnScores(a, tongueCut);
+  const prevScores = prev ? computeFnScores(prev, tongueCut) : null;
   return (
     <div>
       <div style={{background:diagnosis?.qualifies?'#fff1f2':'#f0fdf4',border:`2px solid ${diagnosis?.qualifies?'#fca5a5':'#86efac'}`,borderRadius:'12px',padding:'12px',textAlign:'center',marginBottom:'12px'}}>
@@ -2450,25 +2737,30 @@ function PrintAdult({a, patientName, tongueCut}) {
         </p>
         <p style={{fontSize:'12px',marginTop:'3px',color:diagnosis?.qualifies?'#dc2626':'#16a34a'}}>気になる項目：7項目中 {ngCount}項目</p>
       </div>
-      <Section title="お口の機能バランス（基準ラインと比べて）">
+      <Section title={prev?`お口の機能バランス（前回 ${formatDate(prev.date)} との比較）`:'お口の機能バランス（基準ラインと比べて）'}>
         <div style={{display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
-          <div style={{flex:'1 1 300px',textAlign:'center'}}><FnRadar scores={scores}/></div>
+          <div style={{flex:'1 1 300px',textAlign:'center'}}><FnRadar scores={scores} prev={prevScores}/></div>
           <div style={{flex:'1 1 190px'}}>
             {scores.map(s=>{
               const p=L_PLAIN[s.key]||{};
+              const ps = prevScores ? prevScores.find(x=>x.key===s.key) : null;
+              const improved = ps && ps.weak && !s.weak;   // 前回● → 今回○
+              const declined = ps && !ps.weak && s.weak;   // 前回○ → 今回●
               return (
                 <div key={s.key} style={{display:'flex',alignItems:'center',gap:'7px',padding:'2.5px 0',borderBottom:'1px solid #f3f4f6'}}>
                   <span style={{fontSize:'13px',color:s.weak?'#ef4444':'#22c55e',flexShrink:0}}>{s.weak?'●':'○'}</span>
                   <span style={{width:'72px',flexShrink:0,fontSize:'11px',fontWeight:'600',color:'#111'}}>{s.name}</span>
                   <span style={{flex:1,fontSize:'10.5px',color:s.weak?'#dc2626':'#16a34a'}}>{s.weak?(p.bad||'弱め'):(p.good||'良好')}</span>
+                  {improved && <span style={{fontSize:'9.5px',fontWeight:'700',color:'#d97706',background:'#fef3c7',borderRadius:'8px',padding:'1px 6px',flexShrink:0}}>改善！</span>}
+                  {declined && <span style={{fontSize:'9.5px',fontWeight:'600',color:'#6b7280',background:'#f3f4f6',borderRadius:'8px',padding:'1px 6px',flexShrink:0}}>要ケア</span>}
                 </div>
               );
             })}
           </div>
         </div>
-        <p style={{fontSize:'10px',color:'#888',marginTop:'4px'}}>オレンジの点線が「基準ライン」です。線の内側にへこんでいる項目が、平均より弱めのところです。</p>
+        <p style={{fontSize:'10px',color:'#888',marginTop:'4px'}}>オレンジの点線が「基準ライン」です。線の内側にへこんでいる項目が、平均より弱めのところです。{prev && '灰色の点線は前回の結果です。'}</p>
       </Section>
-      {a.notes && <Section title="歯科医院からのひとこと"><p style={{fontSize:'13px',color:'#374151',background:'#f8fafc',borderRadius:'10px',padding:'10px 14px'}}>{a.notes}</p></Section>}
+      {a.notes && <Section title="歯科医院からのひとこと"><p style={{fontSize:'13px',color:'#374151',background:'#f8fafc',borderRadius:'10px',padding:'10px 14px',whiteSpace:'pre-line'}}>{a.notes}</p></Section>}
       <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:'10px',padding:'10px 14px',marginTop:'8px'}}>
         <p style={{fontSize:'12px',color:'#92400e'}}>💡 気になる項目は、裏面のお口のトレーニングで改善が期待できます。次回のご来院時に、いっしょに確認していきましょう。</p>
       </div>
@@ -2487,6 +2779,217 @@ function PrintAdult({a, patientName, tongueCut}) {
           <p style={{fontSize:'9px',color:'#aaa',marginTop:'6px'}}>参考：口腔機能向上のための実地指導内容</p>
         </div>
       )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+// 管理計画書（院内用・カルテ添付）
+// ═══════════════════════════════════════════════
+// 再評価時期（評価日の約3か月後）
+// 管理方針・目標の定型文（メモ欄にワンタップ挿入）
+const NOTE_TEMPLATES = {
+  pediatric: [
+    {label:'🏃 訓練開始',   text:'口腔機能発達不全症と診断。ご家庭でのトレーニングを処方し、3か月間実施のうえ再評価を行う。保護者へ指導内容を説明した。'},
+    {label:'🎯 機能獲得',   text:'正常な口腔機能の獲得を目標に、口腔周囲筋の訓練と生活習慣（食事姿勢・鼻呼吸）の指導を行う。'},
+    {label:'👄 口唇閉鎖力', text:'口唇閉鎖力の向上を目標に、リップルトレーナー等による口唇訓練を毎日実施するよう指導した。'},
+    {label:'👀 経過観察',   text:'機能の発達を経過観察とし、約3か月後に再評価を行う。'},
+  ],
+  adult: [
+    {label:'🏃 訓練開始',   text:'口腔機能低下症と診断。該当項目に対応するお口の機能トレーニングを処方し、3か月間実施のうえ再評価を行う。'},
+    {label:'🎯 機能維持',   text:'現在の口腔機能の維持を目標に、お口の体操の継続と定期的な経過観察を行う。'},
+    {label:'💧 衛生・乾燥', text:'口腔衛生状態・口腔乾燥の改善を優先し、清掃指導と保湿ケア、だ液腺マッサージを指導した。'},
+    {label:'👀 経過観察',   text:'明らかな機能低下は認めず。経過観察とし、約3か月後に再評価を行う。'},
+  ],
+};
+// メモ欄の下に置く定型文チップ（タップで追記）
+function NoteTemplates({kind, notes, setNotes}){
+  return (
+    <div className="flex flex-wrap gap-2 mt-2">
+      <span className="text-xs text-gray-400 self-center">定型文：</span>
+      {NOTE_TEMPLATES[kind].map(t=>(
+        <button key={t.label} onClick={()=>setNotes(notes ? notes+'\n'+t.text : t.text)}
+          className="text-xs px-3 py-1.5 rounded-full bg-gray-100 text-gray-600 hover:bg-blue-50 hover:text-blue-700 border border-gray-200"
+          title={t.text}>＋{t.label}</button>
+      ))}
+    </div>
+  );
+}
+
+function reEvalLabel(dateStr){
+  const d = new Date(dateStr); d.setMonth(d.getMonth()+3);
+  return `${d.getFullYear()}年${d.getMonth()+1}月頃（約3か月後）`;
+}
+// 管理方針・目標＋署名欄（小児・成人共通）
+function PlanFooter({a, clinic, trainingsLabel}){
+  return (
+    <div>
+      <Section title="管理方針・目標（ゴール）">
+        <div style={{border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',minHeight:'52px'}}>
+          {a.notes && <p style={{fontSize:'11px',color:'#111',marginBottom:'4px',whiteSpace:'pre-line'}}>{a.notes}</p>}
+          {trainingsLabel && <p style={{fontSize:'10.5px',color:'#374151'}}>指導・訓練：{trainingsLabel}</p>}
+          <div style={{borderBottom:'1px dotted #d1d5db',height:'18px'}}/>
+          <div style={{borderBottom:'1px dotted #d1d5db',height:'18px'}}/>
+        </div>
+      </Section>
+      <div style={{display:'flex',gap:'10px',marginTop:'10px',alignItems:'flex-end'}}>
+        <div style={{flex:1,fontSize:'11px',color:'#374151'}}>
+          <p>再評価の時期：<span style={{fontWeight:'700',color:'#111'}}>{reEvalLabel(a.date)}</span></p>
+        </div>
+        <table style={{borderCollapse:'collapse',fontSize:'10.5px'}}>
+          <tbody>
+            <tr>
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px',background:'#f3f4f6',whiteSpace:'nowrap'}}>保険医療機関名</td>
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px',minWidth:'150px'}}>{clinic?.name||''}</td>
+            </tr>
+            <tr>
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px',background:'#f3f4f6'}}>歯科医師名</td>
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px'}}>{clinic?.doctor||''}　　　㊞</td>
+            </tr>
+            <tr>
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px',background:'#f3f4f6'}}>歯科衛生士名</td>
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px'}}></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+// 表のセル共通スタイル
+const PT_TH = {border:'1px solid #9ca3af',padding:'3px 6px',background:'#f3f4f6',fontSize:'10px',fontWeight:'600',color:'#374151',textAlign:'left'};
+const PT_TD = {border:'1px solid #9ca3af',padding:'3px 6px',fontSize:'10.5px',color:'#111'};
+
+function PlanAdult({a, tongueCut, prev, clinic}){
+  const m = a.measurements||{};
+  const pm = prev ? (prev.measurements||{}) : null;
+  const checked = new Set(a.checkedLItems||[]);
+  const v = (x,suffix='') => (x!=null && x!=='') ? `${x}${suffix}` : '未検査';
+  const rows = [
+    {id:'L-1', name:'口腔衛生状態不良', test:'TCI（舌苔の付着度）', val:v(m.tciScore,'%'), pv:pm?v(pm.tciScore,'%'):null, crit:'50%以上'},
+    {id:'L-2', name:'口腔乾燥', test:'口腔湿潤度（ムーカス）'+(m.saxonTest?` / サクソン ${m.saxonTest}g`:''), val:v(m.oralMoisture), pv:pm?v(pm.oralMoisture):null, crit:'27未満'},
+    {id:'L-3', name:'咬合力低下', test:`咬合力 Oramo-bf（フィルタ${m.biteFilter?'あり':'なし'}）/ 残存${v(m.remainingTeeth,'本')}`, val:v(m.biteForce,'N'), pv:pm?v(pm.biteForce,'N'):null, crit:m.biteFilter?'350N未満':'500N未満'},
+    {id:'L-4', name:'舌口唇運動機能低下', test:'オーラルディアドコキネシス', val:(m.ddk_pa||m.ddk_ta||m.ddk_ka)?`パ${m.ddk_pa||'—'} タ${m.ddk_ta||'—'} カ${m.ddk_ka||'—'}`:'未検査', pv:pm?((pm.ddk_pa||pm.ddk_ta||pm.ddk_ka)?`パ${pm.ddk_pa||'—'} タ${pm.ddk_ta||'—'} カ${pm.ddk_ka||'—'}`:'未検査'):null, crit:'いずれか6回/秒未満'},
+    {id:'L-5', name:'低舌圧', test:'舌圧検査（JMS舌圧計）', val:v(m.maxTonguePressure,'kPa'), pv:pm?v(pm.maxTonguePressure,'kPa'):null, crit:`${tongueCut||30}kPa未満`},
+    {id:'L-6', name:'咀嚼機能低下', test:'グルコース含有グミ法', val:v(m.masticationScore,'mg/dL'), pv:pm?v(pm.masticationScore,'mg/dL'):null, crit:'100mg/dL未満'},
+    {id:'L-7', name:'嚥下機能低下', test:'EAT-10'+(m.rsst?` / RSST ${m.rsst}回`:''), val:v(m.eatScore,'点'), pv:pm?v(pm.eatScore,'点'):null, crit:'3点以上'},
+  ];
+  const cnt = (a.checkedLItems||[]).length;
+  const trainings = prescribeAdultTrainings(a.checkedLItems||[], m);
+  const tLabel = trainings.map(t=>`${t.letter}.${t.name}`).join('、');
+  return (
+    <div>
+      <Section title="検査結果">
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead>
+            <tr>
+              <th style={PT_TH}>項目</th><th style={PT_TH}>検査法</th>
+              {prev && <th style={{...PT_TH,textAlign:'center'}}>前回</th>}
+              <th style={{...PT_TH,textAlign:'center'}}>今回</th><th style={PT_TH}>該当基準</th><th style={{...PT_TH,textAlign:'center'}}>判定</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r=>{
+              const hit = checked.has(r.id);
+              return (
+                <tr key={r.id} style={{background:hit?'#fef2f2':'#fff'}}>
+                  <td style={{...PT_TD,fontWeight:'600',whiteSpace:'nowrap'}}>{r.id} {r.name}</td>
+                  <td style={{...PT_TD,fontSize:'9.5px',color:'#4b5563'}}>{r.test}</td>
+                  {prev && <td style={{...PT_TD,textAlign:'center',color:'#6b7280'}}>{r.pv}</td>}
+                  <td style={{...PT_TD,textAlign:'center',fontWeight:'600'}}>{r.val}</td>
+                  <td style={{...PT_TD,fontSize:'9.5px',color:'#4b5563',whiteSpace:'nowrap'}}>{r.crit}</td>
+                  <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:hit?'#dc2626':'#16a34a'}}>{hit?'該当':'—'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {prev && <p style={{fontSize:'9px',color:'#888',marginTop:'3px'}}>前回：{formatDate(prev.date)}</p>}
+      </Section>
+      <div style={{display:'flex',gap:'8px',alignItems:'stretch',margin:'10px 0'}}>
+        <div style={{flex:1,border:'2px solid '+(a.diagnosis?.qualifies?'#fca5a5':'#86efac'),borderRadius:'8px',padding:'7px 12px',background:a.diagnosis?.qualifies?'#fff1f2':'#f0fdf4'}}>
+          <p style={{fontSize:'10px',color:'#6b7280'}}>診断（該当 {cnt}/7 項目・3項目以上で診断）</p>
+          <p style={{fontSize:'14px',fontWeight:'700',color:a.diagnosis?.qualifies?'#991b1b':'#166534'}}>
+            口腔機能低下症：{a.diagnosis?.qualifies?'該当':'非該当'}
+          </p>
+        </div>
+      </div>
+      <PlanFooter a={a} clinic={clinic} trainingsLabel={tLabel}/>
+    </div>
+  );
+}
+
+function PlanPediatric({a, patient, ageYears, prev, clinic}){
+  const isPre = a.phase==='pre';
+  const items = isPre ? C_ITEMS_PRE : C_ITEMS_POST;
+  const checkedIds = a.checkedCItems||[];
+  const checkedItems = items.filter(it=>checkedIds.includes(it.id));
+  const sc = a.scoring||{};
+  const ln = lipForceNorm(ageYears, patient.gender);
+  const tn = pedTongueNorm(ageYears);
+  const bodyIdx = (a.height && a.weight) ? computeBodyIndex(ageYears, a.height, a.weight) : null;
+  const patterns = (a.diagnosis?.matchedPatterns||[]);
+  const trainings = prescribeTrainings(patterns);
+  const tLabel = trainings.map(t=>t.name).join('、');
+  const pv = prev||{};
+  return (
+    <div>
+      <Section title={`該当チェック項目（${isPre?'別紙1・離乳完了前':'別紙2・離乳完了後'}）`}>
+        {checkedItems.length===0 && <p style={{fontSize:'11px',color:'#6b7280'}}>該当項目なし</p>}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'2px 10px'}}>
+          {checkedItems.map(it=>(
+            <p key={it.id} style={{fontSize:'10.5px',color:'#111'}}>☑ <span style={{fontFamily:'monospace',color:'#2563eb'}}>{it.id}</span> {it.label}<span style={{color:'#9ca3af',fontSize:'9px'}}>（{it.fn}）</span></p>
+          ))}
+        </div>
+      </Section>
+      <Section title="診断">
+        <div style={{border:'2px solid '+(sc.qualifies?'#fca5a5':'#86efac'),borderRadius:'8px',padding:'7px 12px',background:sc.qualifies?'#fff1f2':'#f0fdf4'}}>
+          <p style={{fontSize:'14px',fontWeight:'700',color:sc.qualifies?'#991b1b':'#166534'}}>口腔機能発達不全症：{sc.qualifies?'該当':'非該当'}</p>
+          <p style={{fontSize:'9.5px',color:'#6b7280',marginTop:'2px'}}>「食べる」「話す」のC項目 {sc.dxCount||0}/{sc.dxTotal||0} 項目該当・中核群（{isPre?'C-1〜C-9':'C-1〜C-6'}）{sc.coreCount||0}件（基準：2項目以上かつ中核群1項目以上）</p>
+        </div>
+      </Section>
+      <Section title="検査結果">
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead>
+            <tr><th style={PT_TH}>検査</th>{prev && <th style={{...PT_TH,textAlign:'center'}}>前回</th>}<th style={{...PT_TH,textAlign:'center'}}>今回</th><th style={PT_TH}>基準（年齢別）</th><th style={{...PT_TH,textAlign:'center'}}>判定</th></tr>
+          </thead>
+          <tbody>
+            <tr style={{background:a.lipLow?'#fef2f2':'#fff'}}>
+              <td style={PT_TD}>口唇閉鎖力（りっぷるくん）</td>
+              {prev && <td style={{...PT_TD,textAlign:'center',color:'#6b7280'}}>{pv.lipClosureForce?`${pv.lipClosureForce}N`:'—'}</td>}
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'600'}}>{a.lipClosureForce?`${a.lipClosureForce}N`:'未検査'}</td>
+              <td style={{...PT_TD,fontSize:'9.5px'}}>{ln?`${ln.age}歳${ln.gender==='f'?'女':'男'} 平均${ln.mean}・-1SD ${ln.minus1sd}N以下で不足`:'—'}</td>
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:a.lipLow?'#dc2626':'#16a34a'}}>{a.lipClosureForce?(a.lipLow?'不足':'良好'):'—'}</td>
+            </tr>
+            <tr style={{background:a.tongueLow?'#fef2f2':'#fff'}}>
+              <td style={PT_TD}>最大舌圧（JMS舌圧計）</td>
+              {prev && <td style={{...PT_TD,textAlign:'center',color:'#6b7280'}}>{pv.maxTonguePressure?`${pv.maxTonguePressure}kPa`:'—'}</td>}
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'600'}}>{a.maxTonguePressure?`${a.maxTonguePressure}kPa`:'未検査'}</td>
+              <td style={{...PT_TD,fontSize:'9.5px'}}>{tn?`${tn.age}歳 平均${tn.mean}・cut-off ${tn.cutoff}kPa以下で低舌圧`:'—'}</td>
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:a.tongueLow?'#dc2626':'#16a34a'}}>{a.maxTonguePressure?(a.tongueLow?'低舌圧':'良好'):'—'}</td>
+            </tr>
+            <tr style={{background:bodyIdx&&bodyIdx.abnormal?'#fef2f2':'#fff'}}>
+              <td style={PT_TD}>体格（{bodyIdx?bodyIdx.name:'カウプ/ローレル'}）</td>
+              {prev && <td style={{...PT_TD,textAlign:'center',color:'#6b7280'}}>{(pv.height&&pv.weight)?`${pv.height}cm/${pv.weight}kg`:'—'}</td>}
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'600'}}>{bodyIdx?`${bodyIdx.value}（${a.height}cm・${a.weight}kg）`:'未計測'}</td>
+              <td style={{...PT_TD,fontSize:'9.5px'}}>{bodyIdx?bodyIdx.label:'—'}</td>
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:bodyIdx&&bodyIdx.abnormal?'#dc2626':'#16a34a'}}>{bodyIdx?(bodyIdx.abnormal?'注意':'良好'):'—'}</td>
+            </tr>
+          </tbody>
+        </table>
+        {prev && <p style={{fontSize:'9px',color:'#888',marginTop:'3px'}}>前回：{formatDate(prev.date)}</p>}
+      </Section>
+      {patterns.length>0 && (
+        <Section title="診断パターン">
+          <p style={{fontSize:'11px',color:'#111'}}>
+            {patterns.map(({patternId,type})=>{
+              const pat=PATTERNS[patternId]; if(!pat) return null;
+              return <span key={patternId} style={{display:'inline-block',marginRight:'8px',marginBottom:'2px'}}>{type==='primary'?'◎':'○'}{pat.name}{type==='primary'&&<span style={{fontSize:'9px',color:'#dc2626'}}>（主）</span>}</span>;
+            })}
+          </p>
+        </Section>
+      )}
+      <PlanFooter a={a} clinic={clinic} trainingsLabel={tLabel}/>
     </div>
   );
 }
