@@ -14,6 +14,8 @@
 
 <meta name="format-detection" content="telephone=no"/>
 <title>口腔機能管理アプリ</title>
+<!-- BUILD-MARKER: B3-stepper_B5-stepjump_B6-phaseswitch / batch1-v35 -->
+
 <script>/**
  * @license React
  * react.production.min.js
@@ -506,7 +508,10 @@ function monthlyBillingRows(mgmtRow){
   ];
 }
 // 算定メモの組み立て（小児）。qualifies=診断成立, dxCount=「食べる・話す」該当数, hasLip/hasTongue=検査入力の有無
-function pedBillingSections(qualifies, dxCount, hasLip, hasTongue){
+// 検査行のdetail。警告(w)ありなら算定不可の旨を表示。引数省略時は既定文言（後方互換）
+function testDetail(base, w){ return w ? '3月に1回／⚠ 前回'+w.prev+'から3か月未満・算定不可（次回'+w.next+'）' : base; }
+function pedBillingSections(qualifies, dxCount, hasLip, hasTongue, warns){
+  warns = warns || {};
   const sections = [];
   if (qualifies) {
     const m1 = dxCount >= 3;
@@ -515,13 +520,14 @@ function pedBillingSections(qualifies, dxCount, hasLip, hasTongue){
     ));
   }
   const tests = [];
-  if (hasTongue) tests.push({name:'舌圧検査', detail:'3月に1回', point:FEE.testTongue});
-  if (hasLip)    tests.push({name:'小児口唇閉鎖力検査', detail:'3月に1回', point:FEE.testLip});
+  if (hasTongue) tests.push({name:'舌圧検査', detail:testDetail('3月に1回', warns.tongue), point:FEE.testTongue});
+  if (hasLip)    tests.push({name:'小児口唇閉鎖力検査', detail:testDetail('3月に1回', warns.lip), point:FEE.testLip});
   if (tests.length) sections.push({label:'実施した検査（3月に1回）', rows:tests});
   return sections;
 }
-// 算定メモの組み立て（成人）。hasT/hasB/hasM=舌圧・咬合圧・ムーカス入力の有無, ageYears=年齢（50歳未満は要件注記）
-function adultBillingSections(qualifies, hasT, hasB, hasM, ageYears){
+// 算定メモの組み立て（成人）。hasT/hasB/hasM=舌圧・咬合圧・ムーカス入力の有無, ageYears=年齢（50歳未満は要件注記）, warns={tongue,bite,moist}=各検査の3か月警告
+function adultBillingSections(qualifies, hasT, hasB, hasM, ageYears, warns){
+  warns = warns || {};
   const sections = [];
   if (qualifies) {
     const m1 = hasT || hasB || hasM; // 対象検査（舌圧/咬合圧1/湿潤度）のいずれか実施で管理料1
@@ -531,9 +537,9 @@ function adultBillingSections(qualifies, hasT, hasB, hasM, ageYears){
     ));
   }
   const tests = [];
-  if (hasT) tests.push({name:'舌圧検査', detail:'3月に1回', point:FEE.testTongue});
-  if (hasB) tests.push({name:'咬合圧検査1', detail:'3月に1回・咀嚼能力検査1とは3月内排他', point:FEE.testBite});
-  if (hasM) tests.push({name:'口腔粘膜湿潤度検査', detail:'3月に1回・令和8年新設', point:FEE.testMoist});
+  if (hasT) tests.push({name:'舌圧検査', detail:testDetail('3月に1回', warns.tongue), point:FEE.testTongue});
+  if (hasB) tests.push({name:'咬合圧検査1', detail:testDetail('3月に1回・咀嚼能力検査1とは3月内排他', warns.bite), point:FEE.testBite});
+  if (hasM) tests.push({name:'口腔粘膜湿潤度検査', detail:testDetail('3月に1回・令和8年新設', warns.moist), point:FEE.testMoist});
   if (tests.length) sections.push({label:'実施した検査（3月に1回）', rows:tests});
   return sections;
 }
@@ -570,7 +576,7 @@ function BillingBox({qualifies, sections}){
         {tests>0 && <div className="flex justify-between"><span>検査分 小計</span><span className="font-bold">{tests}点</span></div>}
         {monthly>0 && tests>0 && <div className="flex justify-between"><span>検査月の合計</span><span className="font-bold">{monthly+tests}点</span></div>}
       </div>
-      <p className="text-[11px] text-gray-400">※取り漏れ防止のメモです（画面表示のみ・印刷されません）。算定可否はレセプトで最終確認してください。</p>
+      <p className="text-[11px] text-gray-400">※取り漏れ防止のメモです。印刷は印刷プレビューの「算定メモ」タブから。算定可否はレセプトで最終確認してください。</p>
     </div>
   );
 }
@@ -618,6 +624,8 @@ function formatDate(s) {
   const d = new Date(s);
   return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
 }
+// ひらがな→カタカナ変換（検索でひらがな入力をカタカナのフリガナにヒットさせる）
+const hira2kata = s => (s||'').replace(/[ぁ-ゖ]/g, c=>String.fromCharCode(c.charCodeAt(0)+0x60));
 function computeAge(birthDate) {
   const birth = new Date(birthDate), now = new Date();
   let years = now.getFullYear() - birth.getFullYear();
@@ -663,15 +671,166 @@ function load(key, fallback) {
 function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 
 // ═══════════════════════════════════════════════
+// 検査間隔（3か月ルール）判定ヘルパー
+//   保険の検査料（舌圧・小児口唇閉鎖力・咬合圧1・口腔粘膜湿潤度）は「3月に1回」＝
+//   暦月ベースで前回検査から3暦月未満は算定不可。前回検査値が入力済みの直近評価日を基準に判定。
+// ═══════════════════════════════════════════════
+// 暦月差 = (y2*12+m2)-(y1*12+m1)。「3月に1回」は日数でなく暦月で判定
+function calMonthDiff(d1, d2){ const a=new Date(d1), b=new Date(d2);
+  return (b.getFullYear()*12+b.getMonth()) - (a.getFullYear()*12+a.getMonth()); }
+// 指定の検査値が入力されている直近の過去評価日（excludeId=今セッションの保存分を除外）
+function lastTestedDate(assessments, patientId, type, getter, excludeId){
+  const hit = assessments.filter(x=>x.patientId===patientId && x.type===type && x.id!==excludeId)
+    .filter(x=>{const v=getter(x); return v!=null && v!=='';})
+    .sort((x,y)=>new Date(y.date)-new Date(x.date))[0];
+  return hit ? hit.date : null; }
+// 3か月ルール警告。前回から3暦月以上経過していればnull
+function testIntervalWarn(prevDate, baseDate){
+  if(!prevDate) return null;
+  if(calMonthDiff(prevDate, baseDate||new Date()) >= 3) return null;
+  const p=new Date(prevDate), n=new Date(p.getFullYear(), p.getMonth()+3, 1);
+  return { prev:`${p.getFullYear()}年${p.getMonth()+1}月`, next:`${n.getFullYear()}年${n.getMonth()+1}月` }; }
+// 評価日時点の年齢（computeAgeはnow固定のため別関数。基準日をdateStrにしてyears（整数）のみ返す）
+function yearsAtDate(birth, dateStr){
+  if(!birth) return null;
+  const b=new Date(birth), d=dateStr?new Date(dateStr):new Date();
+  let years = d.getFullYear() - b.getFullYear();
+  let months = d.getMonth() - b.getMonth();
+  if (months < 0) { years--; months += 12; }
+  if (d.getDate() < b.getDate()) months--;
+  if (months < 0) { years--; }
+  return years; }
+
+// ═══════════════════════════════════════════════
+// 写真ストア（IndexedDB）── 顔貌写真をdataURL文字列で端末内保存（小児フロー専用）
+//   localStorage（約5MB）では足りないためIndexedDBを使用。key=photoId → dataURL文字列。
+//   dataURL保存の理由：旧iOS SafariのBlob不具合回避・<img src>とJSONバックアップに直結。
+// ═══════════════════════════════════════════════
+const PHOTO_DB = 'oralFuncPhotos', PHOTO_STORE = 'photos';
+let _photoDBPromise = null; // openを使い回す（Promiseキャッシュ）
+function openPhotoDB(){
+  if(_photoDBPromise) return _photoDBPromise;
+  _photoDBPromise = new Promise((resolve,reject)=>{
+    try {
+      const req = indexedDB.open(PHOTO_DB, 1);
+      req.onupgradeneeded = () => { const db = req.result; if(!db.objectStoreNames.contains(PHOTO_STORE)) db.createObjectStore(PHOTO_STORE); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    } catch(e){ reject(e); }
+  });
+  return _photoDBPromise;
+}
+// 1枚保存（id→dataURL文字列）
+async function putPhoto(id, dataURL){
+  const db = await openPhotoDB();
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction(PHOTO_STORE,'readwrite');
+    tx.objectStore(PHOTO_STORE).put(dataURL, id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+// 1枚取得（なければundefined）
+async function getPhoto(id){
+  const db = await openPhotoDB();
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction(PHOTO_STORE,'readonly');
+    const r = tx.objectStore(PHOTO_STORE).get(id);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+// 複数枚削除（idの配列）
+async function deletePhotos(ids){
+  if(!ids || !ids.length) return;
+  const db = await openPhotoDB();
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction(PHOTO_STORE,'readwrite');
+    const st = tx.objectStore(PHOTO_STORE);
+    ids.forEach(id=>st.delete(id));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+// 全photoIdを列挙
+async function listPhotoIds(){
+  const db = await openPhotoDB();
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction(PHOTO_STORE,'readonly');
+    const r = tx.objectStore(PHOTO_STORE).getAllKeys();
+    r.onsuccess = () => resolve(r.result||[]);
+    r.onerror = () => reject(r.error);
+  });
+}
+// 写真ストアを全消去（バックアップ復元時の全置き換え用）
+async function clearAllPhotos(){
+  const db = await openPhotoDB();
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction(PHOTO_STORE,'readwrite');
+    tx.objectStore(PHOTO_STORE).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+// 孤児写真の掃除：参照されていないphotoIdを削除（復元・クラッシュ等の取りこぼし回収）
+async function sweepOrphanPhotos(){
+  try {
+    const ids = await listPhotoIds();
+    if(!ids.length) return;
+    const refs = new Set();
+    for(const a of load('assessments',[])){ (a.photos||[]).forEach(p=>{ if(p&&p.id) refs.add(p.id); }); }
+    const orphans = ids.filter(id=>!refs.has(id));
+    if(orphans.length) await deletePhotos(orphans);
+  } catch(e){ /* 失敗は握りつぶし（次回起動で再試行） */ }
+}
+// 画像ファイルを縮小＆JPEG化してdataURL文字列にする（長辺1280px・品質0.75 → 1枚約150〜300KB）
+//   EXIF回転はiPadOS 13.4+のSafariがデコード時に自動適用するため手動パース不要。
+function compressImageFile(file, maxEdge=1280, quality=0.75){
+  return new Promise((resolve,reject)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if(Math.max(w,h) > maxEdge){ const s = maxEdge/Math.max(w,h); w = Math.round(w*s); h = Math.round(h*s); }
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        const dataURL = cv.toDataURL('image/jpeg', quality);
+        URL.revokeObjectURL(url);
+        resolve(dataURL);
+      } catch(e){ URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('画像を読み込めませんでした')); };
+    img.src = url;
+  });
+}
+// dataURLのおおよそのバイト数（base64部分の長さから換算）
+function dataURLBytes(dataURL){
+  if(!dataURL) return 0;
+  const i = dataURL.indexOf(',');
+  const b64 = i>=0 ? dataURL.slice(i+1) : dataURL;
+  return Math.round(b64.length * 3 / 4);
+}
+
+// ═══════════════════════════════════════════════
 // バックアップ（パスワード暗号化）── CryptoJS(PBKDF2+AES)。localhost以外/iPadのLAN(http)でも動作
 // ═══════════════════════════════════════════════
 const BACKUP_ITER = 30000; // PBKDF2の反復回数（純JSのため過大にすると遅い。十分な強度かつ実用速度）
 const BACKUP_KEYS = ['patients','assessments','clinic'];
-// 全データを集めて暗号化し、ファイル用オブジェクト(JSON)を返す
-function makeEncryptedBackup(password) {
+// 全データ（写真同梱）を集めて暗号化し、ファイル用オブジェクト(JSON)を返す。schema:2。
+//   写真はIndexedDBから読むためasync。data.photos={id:dataURL}。
+async function makeEncryptedBackup(password) {
+  // IndexedDBの全写真を {id:dataURL} に集約（参照集合に限らず存在する全件を同梱）
+  const photoMap = {};
+  let photoCount = 0;
+  try {
+    const ids = await listPhotoIds();
+    for(const id of ids){ const d = await getPhoto(id); if(d!=null){ photoMap[id] = d; photoCount++; } }
+  } catch(e){ /* 写真が読めなくても本体は書き出す */ }
   const payload = {
-    app:'oralFunctionApp', schema:1, exportedAt:new Date().toISOString(),
-    data:{ patients:load('patients',[]), assessments:load('assessments',[]), clinic:load('clinic',{}) }
+    app:'oralFunctionApp', schema:2, exportedAt:new Date().toISOString(),
+    data:{ patients:load('patients',[]), assessments:load('assessments',[]), clinic:load('clinic',{}), photos:photoMap }
   };
   const salt = CryptoJS.lib.WordArray.random(16);
   const iv   = CryptoJS.lib.WordArray.random(16);
@@ -681,7 +840,7 @@ function makeEncryptedBackup(password) {
     app:'oralFunctionApp', enc:'AES-CBC', kdf:'PBKDF2-SHA256', iter:BACKUP_ITER,
     salt: salt.toString(CryptoJS.enc.Hex), iv: iv.toString(CryptoJS.enc.Hex),
     ct: enc.toString(), createdAt:new Date().toISOString(),
-    counts:{ patients:(load('patients',[])||[]).length, assessments:(load('assessments',[])||[]).length }
+    counts:{ patients:(load('patients',[])||[]).length, assessments:(load('assessments',[])||[]).length, photos:photoCount }
   };
 }
 // ファイルオブジェクトとパスワードから復号。失敗時は例外
@@ -911,6 +1070,58 @@ function FnRadar({scores, prev}){
     </svg>
   );
 }
+// 検査値の推移（SVG折れ線グラフ）。points=[{date,value}]昇順、cutoffs=各時点の基準値(null可)
+function TrendChart({title, unit, points, cutoffs, color='#2563eb'}){
+  const W=360, H=170, padL=34, padR=10, padT=14, padB=26;
+  const vals = points.map(p=>p.value).concat((cutoffs||[]).filter(v=>v!=null));
+  const ymax = Math.max.apply(null, vals)*1.15 || 1;
+  const x=i=>padL+(W-padL-padR)*(points.length<2?0:i/(points.length-1));
+  const y=v=>padT+(H-padT-padB)*(1-v/ymax);
+  const linePath = points.map((p,i)=>(i?'L':'M')+x(i).toFixed(1)+','+y(p.value).toFixed(1)).join(' ');
+  // cut-off（基準値）線：時点ごとに値が変わり得るためポリラインで描く
+  const hasCut = cutoffs && cutoffs.some(v=>v!=null);
+  let cutPath = '';
+  if(hasCut){ let started=false;
+    cutPath = cutoffs.map((v,i)=>{ if(v==null){started=false;return '';} const cmd=started?'L':'M'; started=true; return cmd+x(i).toFixed(1)+','+y(v).toFixed(1); }).filter(Boolean).join(' '); }
+  return (
+    <svg viewBox="0 0 360 170" style={{width:'100%',height:'auto'}}>
+      {/* y軸の目安線（0とymax） */}
+      <line x1={padL} y1={y(0)} x2={W-padR} y2={y(0)} stroke="#e5e7eb" strokeWidth="1"/>
+      <line x1={padL} y1={y(ymax)} x2={W-padR} y2={y(ymax)} stroke="#f1f3f5" strokeWidth="1"/>
+      <text x={padL-4} y={y(0)+3} textAnchor="end" fontSize="9" fill="#9ca3af">0</text>
+      <text x={padL-4} y={y(ymax)+3} textAnchor="end" fontSize="9" fill="#9ca3af">{Math.round(ymax)}</text>
+      {/* 基準値（cut-off）＝オレンジ点線 */}
+      {hasCut && <path d={cutPath} fill="none" stroke="#f59e0b" strokeWidth="2" strokeDasharray="4 3"/>}
+      {/* 実測値＝実線＋丸ドット＋値ラベル */}
+      <path d={linePath} fill="none" stroke={color} strokeWidth="2.2" strokeLinejoin="round"/>
+      {points.map((p,i)=>(
+        <g key={i}>
+          <circle cx={x(i)} cy={y(p.value)} r="3.4" fill={color} stroke="#fff" strokeWidth="1.2"/>
+          <text x={x(i)} y={y(p.value)-7} textAnchor="middle" fontSize="9.5" fontWeight="600" fill={color}>{p.value}</text>
+          {/* x軸ラベル（年下2桁/月） */}
+          {(()=>{const d=new Date(p.date); return <text x={x(i)} y={H-8} textAnchor="middle" fontSize="10" fill="#9ca3af">{`${d.getFullYear()%100}/${d.getMonth()+1}`}</text>;})()}
+        </g>
+      ))}
+    </svg>
+  );
+}
+// 推移カード1系列分（タイトル・凡例・グラフ）。series={points,cutoffs}
+function TrendCard({title, unit, series, color='#2563eb'}){
+  if(!series) return null;
+  const hasCut = series.cutoffs && series.cutoffs.some(v=>v!=null);
+  return (
+    <div className="mb-4 last:mb-0">
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-sm font-semibold text-gray-700">{title}{unit?`（${unit}）`:''}</p>
+        <div className="flex items-center gap-3 text-[10px] text-gray-500">
+          <span className="flex items-center gap-1"><span style={{display:'inline-block',width:'9px',height:'9px',borderRadius:'50%',background:color}}/>実測値</span>
+          {hasCut && <span className="flex items-center gap-1"><span style={{display:'inline-block',width:'14px',height:'0',borderTop:'2px dashed #f59e0b'}}/>基準値(cut-off)</span>}
+        </div>
+      </div>
+      <TrendChart title={title} unit={unit} points={series.points} cutoffs={series.cutoffs} color={color}/>
+    </div>
+  );
+}
 // オリジナル訓練カード（印刷用・GC画像不使用）
 function TrainCardPrint({t}){
   return (
@@ -1021,9 +1232,9 @@ const PATTERNS = {
     causes:['食欲低下や食形態の不適合（長すぎる咀嚼）','口唇閉鎖力不足や水分での流し込み習慣（短すぎる咀嚼）','う蝕の痛み、歯の生え変わり、歯列異常（偏咀嚼）'],
     guidance:'食事中の姿勢（足の裏が床/足置きにつく）の重要性、水分摂取は食後に、食形態の工夫を保護者に指導します。',
     trainings:[
-      {name:'あいうべ体操',desc:'「あ・い・う・べ」と大きく口を動かす',freq:'1日30回（10回×3セット）',icon:'👄'},
-      {name:'咀嚼トレーニングガム',desc:'弾力のある咀嚼訓練用ガムを左右均等に噛む練習',freq:'食後1日2回、各5分',icon:'🦷'},
-      {name:'食事姿勢の指導',desc:'足の裏が床または足置きにつく姿勢で食事',freq:'毎食',icon:'🪑'},
+      {name:'あいうべ体操',desc:'「あ・い・う・べ」と大きく口を動かす。お風呂などで毎日続けると、口やほおの筋肉がしっかり育ちます。',freq:'1日30回（10回×3セット）',icon:'👄'},
+      {name:'咀嚼トレーニングガム',desc:'弾力のある咀嚼訓練用ガムを左右均等に噛む練習。よく噛むくせをつけ、丸呑みや片側だけで噛む偏りを防ぎます。',freq:'食後1日2回、各5分',icon:'🦷'},
+      {name:'食事姿勢の指導',desc:'足の裏が床または足置きにつく姿勢で食事。体が安定すると噛む力が伝わりやすく、こぼしやむせも減ります。',freq:'毎食',icon:'🪑'},
     ]},
   lipClosure:{id:'lipClosure',name:'口唇閉鎖不全（おロポカン）',
     cItems:['C-9','C-10','C-11','C-14'],
@@ -1031,8 +1242,8 @@ const PATTERNS = {
     causes:['口腔周囲筋の筋力不足、口を閉じる習慣・意識の不足','鼻閉・アレルギー性鼻炎による鼻呼吸困難','舌の低位（低位舌）による口唇支持の欠如'],
     guidance:'口唇閉鎖トレーニングを継続的に行い、鼻呼吸の習慣づけを指導します。必要に応じて耳鼻科的評価を検討します。',
     trainings:[
-      {name:'あいうべ体操',desc:'特に「べ」で舌を最大限に伸ばす動作を意識する',freq:'1日30回',icon:'👄'},
-      {name:'リップルトレーナー（口唇閉鎖力訓練）',desc:'リップルトレーナーを前歯と口唇の間に装着し、引き出されないよう口唇で抵抗して保持。前方・左右側方に各10回引き出す',freq:'1日30回（前方・左右各10回）',icon:'💪'},
+      {name:'あいうべ体操',desc:'特に「べ」で舌を最大限に伸ばす動作を意識する。鏡を見ながら行うと正しく動かせているか確認でき、口を閉じる力が高まります。',freq:'1日30回',icon:'👄'},
+      {name:'リップルトレーナー（口唇閉鎖力訓練）',desc:'リップルトレーナーを前歯と口唇の間に装着し、引き出されないよう口唇で抵抗して保持。前方・左右側方に各10回引き出す。遊び感覚で毎日続けると、唇を閉じる力がつき口がポカンと開きにくくなります。',freq:'1日30回（前方・左右各10回）',icon:'💪'},
     ]},
   swallowing:{id:'swallowing',name:'嚥下機能の問題',
     cItems:['C-7'],
@@ -1040,7 +1251,7 @@ const PATTERNS = {
     causes:['嚥下反射の遅延・協調運動の未発達','食形態・食事姿勢の問題'],
     guidance:'食事姿勢の改善、食形態の見直しを指導します。必要に応じてST等を紹介します。',
     trainings:[
-      {name:'パタカラ体操',desc:'「パ・タ・カ・ラ」を大きくはっきり繰り返す',freq:'1日30回、毎食前',icon:'🗣️'},
+      {name:'パタカラ体操',desc:'「パ・タ・カ・ラ」を大きくはっきり繰り返す。飲み込みに使う唇・舌・のどの動きをまとめて鍛え、食前に行うとむせ予防になります。',freq:'1日30回、毎食前',icon:'🗣️'},
     ]},
   tonguePressure:{id:'tonguePressure',name:'低舌圧',
     cItems:['C-17'],
@@ -1048,8 +1259,8 @@ const PATTERNS = {
     causes:['舌筋・口腔周囲筋全体の発育不全','低位舌の習慣'],
     guidance:'舌の筋力トレーニングを継続的に行います。JMS舌圧測定器等で定期的に評価します。',
     trainings:[
-      {name:'舌圧トレーニング',desc:'舌を口蓋に力いっぱい押しつけ5秒保持',freq:'1日30回',icon:'💪'},
-      {name:'ポッピング',desc:'舌を口蓋に吸いつけ、「ポン」と離す動作',freq:'1日20回',icon:'👅'},
+      {name:'舌圧トレーニング',desc:'舌を口蓋に力いっぱい押しつけ5秒保持。舌全体を上あごにぴたっとつけるのがコツで、続けると噛む・飲み込む・話す力の土台になります。',freq:'1日30回',icon:'💪'},
+      {name:'ポッピング',desc:'舌を口蓋に吸いつけ、「ポン」と離す動作。大きな音が出るほど舌がよく動いている合図で、遊びながら舌の力を高められます。',freq:'1日20回',icon:'👅'},
     ]},
   articulation:{id:'articulation',name:'構音異常',
     cItems:['C-13'],
@@ -1057,8 +1268,8 @@ const PATTERNS = {
     causes:['舌・口唇の運動協調性の問題','歯列異常による構音への影響'],
     guidance:'言語聴覚士（ST）への紹介を検討します。',
     trainings:[
-      {name:'構音訓練（必要に応じて言語聴覚士と連携）',desc:'発音完成期（5歳）以降も置換・省略・歪みが続く場合に、対象音の構音訓練を行う。中枢・舌小帯等の要因があれば専門医に紹介',freq:'評価に応じて',icon:'🗣️'},
-      {name:'パ・タ・カ・ラの発音練習',desc:'パ・タ・カ・ラを大きくはっきり発音する遊びを取り入れる',freq:'1日数回',icon:'👅'},
+      {name:'構音訓練（必要に応じて言語聴覚士と連携）',desc:'発音完成期（5歳）以降も置換・省略・歪みが続く場合に、対象音の構音訓練を行う。中枢・舌小帯等の要因があれば専門医に紹介。あせらず一つずつ正しい音を覚えていくことが、はっきりした発音につながります。',freq:'評価に応じて',icon:'🗣️'},
+      {name:'パ・タ・カ・ラの発音練習',desc:'パ・タ・カ・ラを大きくはっきり発音する遊びを取り入れる。口や舌をしっかり動かす練習になり、楽しみながら続けると発音が明瞭になります。',freq:'1日数回',icon:'👅'},
     ]},
   oralHabit:{id:'oralHabit',name:'口腔習癖',
     cItems:['C-15'],
@@ -1066,7 +1277,7 @@ const PATTERNS = {
     causes:['習慣化した口腔習癖（無意識行動）'],
     guidance:'保護者への習癖の認識と除去法の指導を行います。',
     trainings:[
-      {name:'習癖認識プログラム',desc:'習癖が起きた際に自覚し、代替行動をとる習慣づけ',freq:'日常的に意識する',icon:'🧠'},
+      {name:'習癖認識プログラム',desc:'習癖が起きた際に自覚し、代替行動をとる習慣づけ。叱るのではなく気づいたら一緒に手を止める声かけを続けると、無理なく癖が減っていきます。',freq:'日常的に意識する',icon:'🧠'},
     ]},
   sleepApnea:{id:'sleepApnea',name:'睡眠時無呼吸・口呼吸',
     cItems:['C-12','C-16'],
@@ -1074,7 +1285,7 @@ const PATTERNS = {
     causes:['扁桃肥大・アデノイド肥大','口腔・咽頭周囲筋の筋力低下'],
     guidance:'耳鼻咽喉科への紹介を検討します。',
     trainings:[
-      {name:'あいうべ体操',desc:'口蓋垂・咽頭周囲の筋肉を鍛える',freq:'1日30回',icon:'👄'},
+      {name:'あいうべ体操',desc:'口蓋垂・咽頭周囲の筋肉を鍛える。のど周りの筋肉が引き締まると気道が確保されやすく、いびきや口呼吸の改善が期待できます。',freq:'1日30回',icon:'👄'},
     ]},
 };
 
@@ -1171,17 +1382,26 @@ const SAMPLE_PATIENTS = [
 function useStore() {
   const [patients, setPatients] = useState(() => { const v=load('patients',[]); return v.length>0?v:SAMPLE_PATIENTS; });
   const [assessments, setAssessments] = useState(() => load('assessments',[]));
-  const [clinic, setClinicState] = useState(() => load('clinic',{name:'',logo:'',doctor:'',address:'',phone:''}));
+  const [clinic, setClinicState] = useState(() => load('clinic',{name:'',logo:'',doctor:'',address:'',phone:'',doctors:[],hygienists:[]}));
 
   const addPatient = p => { const n=[...patients,p]; setPatients(n); save('patients',n); };
   const updatePatient = p => { const n=patients.map(x=>x.id===p.id?p:x); setPatients(n); save('patients',n); };
   const deletePatient = id => {
+    // 当該患者の全評価が参照する写真をIndexedDBから削除（fire-and-forget）
+    const photoIds = assessments.filter(x=>x.patientId===id).flatMap(x=>(x.photos||[]).map(p=>p.id));
+    if(photoIds.length) deletePhotos(photoIds).catch(()=>{});
     const n=patients.filter(x=>x.id!==id); setPatients(n); save('patients',n);
     const a=assessments.filter(x=>x.patientId!==id); setAssessments(a); save('assessments',a);
   };
   const addAssessment = a => { const n=[...assessments,a]; setAssessments(n); save('assessments',n); };
   const updateAssessment = a => { const n=assessments.map(x=>x.id===a.id?a:x); setAssessments(n); save('assessments',n); };
-  const deleteAssessment = id => { const n=assessments.filter(x=>x.id!==id); setAssessments(n); save('assessments',n); };
+  const deleteAssessment = id => {
+    // 対象評価が参照する写真をIndexedDBから削除（fire-and-forget）
+    const tgt = assessments.find(x=>x.id===id);
+    const photoIds = tgt ? (tgt.photos||[]).map(p=>p.id) : [];
+    if(photoIds.length) deletePhotos(photoIds).catch(()=>{});
+    const n=assessments.filter(x=>x.id!==id); setAssessments(n); save('assessments',n);
+  };
   const setClinic = c => { setClinicState(c); save('clinic',c); };
   const nextNo = () => {
     const max = patients.reduce((m,p)=>Math.max(m,parseInt(p.no.replace('#',''))||0),0);
@@ -1199,8 +1419,10 @@ function useStore() {
 // ═══════════════════════════════════════════════
 const StoreCtx = createContext(null);
 const NavCtx = createContext(null);
+const ToastCtx = createContext(()=>{}); // 保存完了などのトースト表示関数を配信
 const useS = () => useContext(StoreCtx);
 const useNav = () => useContext(NavCtx);
+const useToast = () => useContext(ToastCtx);
 
 // ═══════════════════════════════════════════════
 // SHARED UI
@@ -1229,10 +1451,10 @@ function NavBtns({onBack,onNext,nextLabel}) {
     </div>
   );
 }
-function CheckRow({checked,onChange,label,detail,id,isAuto}) {
+function CheckRow({checked,onChange,label,detail,id,isAuto,disabled}) {
   return (
-    <label className={`flex items-start gap-4 px-5 py-3.5 cursor-pointer transition-colors ${checked?'bg-blue-50':'hover:bg-gray-50'}`}>
-      <input type="checkbox" checked={checked} onChange={onChange} className="mt-0.5 flex-shrink-0"/>
+    <label className={`flex items-start gap-4 px-5 py-3.5 transition-colors ${disabled?'cursor-default':'cursor-pointer'} ${checked?'bg-blue-50':disabled?'':'hover:bg-gray-50'}`}>
+      <input type="checkbox" checked={checked} onChange={onChange} disabled={disabled} className="mt-0.5 flex-shrink-0"/>
       <div className="flex-1">
         <div className="flex items-center gap-1.5 flex-wrap">
           {id && <span className="text-xs font-mono text-blue-600 font-bold">{id}</span>}
@@ -1261,8 +1483,29 @@ function NumInput({label,hint,unit,value,onChange,abnormal,abnormalText}) {
   );
 }
 // リスト式の数値入力（iPadではホイール選択になり素早く選べる）
-function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText}) {
-  const opts = MEAS_OPTS[specKey] || [];
+// テンキー直接入力＋±ステッパー。blur/Enterで MEAS_SPEC にスナップ（snapToSpec 利用）
+function StepperInput({specKey, value, onChange, abnormal, disabled}){
+  const s = MEAS_SPEC[specKey]||{min:0,max:999,step:1,avg:0};
+  const [text, setText] = useState(value==null?'':String(value));
+  useEffect(()=>{ setText(value==null?'':String(value)); }, [value]); // ±押下・プリセット反映
+  const commit = () => { if(text===''){ onChange(''); return; }
+    const n=parseFloat(text); onChange(isNaN(n)?'':snapToSpec(specKey,n)); };
+  const stepBy = dir => { if(disabled) return;
+    const cur=parseFloat(value); const base=isNaN(cur)?s.avg:cur;
+    onChange(snapToSpec(specKey, base+dir*s.step)); };
+  const btnCls = "w-10 h-10 flex-shrink-0 rounded-lg bg-gray-100 text-gray-600 text-xl font-bold active:bg-blue-100 disabled:opacity-40";
+  return (
+    <div className="flex items-center gap-1">
+      <button type="button" onClick={()=>stepBy(-1)} disabled={disabled} className={btnCls}>−</button>
+      <input type="text" inputMode="decimal" value={text} disabled={disabled}
+        onChange={e=>setText(e.target.value.replace(/[^0-9.]/g,''))}
+        onBlur={commit} onKeyDown={e=>{if(e.key==='Enter')e.target.blur();}} placeholder="—"
+        className={`w-16 text-center border rounded-xl px-1 py-2 ${abnormal?'border-red-300 bg-red-50':'border-gray-200'} ${disabled?'opacity-60 bg-gray-100':''} focus:outline-none focus:ring-2 ${abnormal?'focus:ring-red-400':'focus:ring-blue-400'}`}/>
+      <button type="button" onClick={()=>stepBy(+1)} disabled={disabled} className={btnCls}>＋</button>
+    </div>
+  );
+}
+function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText,disabled}) {
   return (
     <div>
       <div className="flex justify-between mb-1">
@@ -1270,11 +1513,7 @@ function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText
         {hint && <span className="text-xs text-gray-400">{hint}</span>}
       </div>
       <div className="flex items-center gap-2">
-        <select value={value||''} onChange={e=>onChange(e.target.value)}
-          className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'}`}>
-          <option value="">—</option>
-          {opts.map(o=><option key={o} value={o}>{o}</option>)}
-        </select>
+        <StepperInput specKey={specKey} value={value} onChange={onChange} abnormal={abnormal&&value!==''} disabled={disabled}/>
         {unit && <span className="text-sm text-gray-500">{unit}</span>}
         {abnormal && value!=='' && <span className="text-xs text-red-600">⚠ {abnormalText||'基準値以下'}</span>}
       </div>
@@ -1292,56 +1531,116 @@ function Header({onBack,backLabel,title,sub}) {
     </header>
   );
 }
-function StepBar({steps,current}) {
+function StepBar({steps,current,onJump}) {
   const idx = steps.findIndex(s=>s.key===current);
   return (
     <div className="bg-white border-b border-gray-100 px-6 py-3 flex items-center gap-1">
-      {steps.map((s,i) => (
+      {steps.map((s,i) => {
+        const done = i<idx;                       // 完了済みステップのみ戻れる
+        const canJump = done && !!onJump;
+        return (
         <React.Fragment key={s.key}>
-          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${i<=idx?'bg-blue-600 text-white':'bg-gray-100 text-gray-400'}`}>
+          <button type="button" disabled={!canJump} onClick={()=>{ if(canJump) onJump(s.key); }}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${i<=idx?'bg-blue-600 text-white':'bg-gray-100 text-gray-400'} ${canJump?'hover:bg-blue-700 active:bg-blue-800 cursor-pointer':'cursor-default'}`}>
             {i<idx?'✓':i+1} {s.label}
-          </div>
+          </button>
           {i<steps.length-1 && <div className="w-3 h-px bg-gray-300"/>}
         </React.Fragment>
-      ))}
+        );
+      })}
     </div>
   );
 }
-function PatientSelect({onSelect,selected}) {
-  const {patients} = useS();
+function PatientSelect({onSelect,selected,flowPage}) {
+  const nav = useNav();
+  const {patients, assessments, deletePatient} = useS();
   const [q,setQ] = useState('');
+  const [del,setDel] = useState(null); // 削除確認モーダル対象の患者id
   const filtered = patients.filter(p=>{
     const lq=q.toLowerCase();
-    return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.no.includes(lq)||(p.chartNo||'').toLowerCase().includes(lq);
+    // ひらがな入力でもカタカナのフリガナにヒットさせる（hira2kataで変換）
+    return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.kana.includes(hira2kata(lq))||p.no.includes(lq)||(p.chartNo||'').toLowerCase().includes(lq);
   });
+  // 患者ごとの最新評価日時。最近評価した患者ほど上に表示
+  const lastAssessAt = useMemo(()=>{
+    const m={};
+    for(const a of assessments){ const t=new Date(a.date).getTime();
+      if(!m[a.patientId] || t>m[a.patientId]) m[a.patientId]=t; }
+    return m;
+  },[assessments]);
+  // 並び順：最新評価が新しい順。評価のない患者はcreatedAt（無ければ0）降順で後ろにまとめる
+  const sorted = useMemo(()=>{
+    return filtered.slice().sort((a,b)=>{
+      const la=lastAssessAt[a.id], lb=lastAssessAt[b.id];
+      if(la!=null && lb!=null) return lb-la;
+      if(la!=null) return -1;
+      if(lb!=null) return 1;
+      return new Date(b.createdAt||0)-new Date(a.createdAt||0);
+    });
+  },[filtered,lastAssessAt]);
   return (
     <div className="max-w-xl mx-auto px-4 py-6">
       <div className="bg-white rounded-2xl shadow-sm p-6">
         <h2 className="font-semibold text-gray-800 mb-4">患者を選択してください</h2>
         <input type="search" value={q} onChange={e=>setQ(e.target.value)} placeholder="カルテ番号・氏名・フリガナで検索"
-          className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-400"/>
+          className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-400"/>
+        {/* 検索欄の下：新規患者の追加 */}
+        <div className="flex items-center mb-3">
+          <button onClick={()=>nav({p:'patientForm',returnTo:flowPage})}
+            className="text-sm font-medium text-blue-600 hover:text-blue-700 px-2 py-2 -ml-2 rounded-lg hover:bg-blue-50">＋新規患者</button>
+        </div>
         <div className="space-y-2 max-h-96 overflow-y-auto">
-          {filtered.map(p=>{
+          {sorted.map(p=>{
             const age=computeAge(p.birth);
+            const lastAt=lastAssessAt[p.id];
             return (
-              <button key={p.id} onClick={()=>onSelect(p.id)}
-                className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${p.id===selected?'border-blue-500 bg-blue-50':'border-gray-200 hover:border-blue-300 hover:bg-blue-50'}`}>
-                {p.chartNo
-                  ? <span className="text-xs font-mono font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded mr-2">No.{p.chartNo}</span>
-                  : <span className="text-xs text-gray-400 font-mono mr-2">{p.no}</span>}
-                <span className="font-medium">{p.name}</span>
-                <span className="text-xs text-gray-500 ml-2">{age.label}</span>
-              </button>
+              <div key={p.id}
+                onClick={()=>onSelect(p.id)}
+                className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-colors cursor-pointer ${p.id===selected?'border-blue-500 bg-blue-50':'border-gray-200 hover:border-blue-300 hover:bg-blue-50'}`}>
+                <div className="flex-1 min-w-0 text-left">
+                  {p.chartNo
+                    ? <span className="text-xs font-mono font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded mr-2">No.{p.chartNo}</span>
+                    : <span className="text-xs text-gray-400 font-mono mr-2">{p.no}</span>}
+                  <span className="font-medium">{p.name}</span>
+                  <span className="text-xs text-gray-500 ml-2">{age.label}</span>
+                  {lastAt && <span className="block text-xs text-gray-400 mt-0.5">前回 {formatDate(lastAt)}</span>}
+                </div>
+                {/* 行内アクション（左：記録一覧 / 編集 / 削除）。行タップ=選択と二重発火しないよう stopPropagation */}
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button onClick={e=>{e.stopPropagation();nav({p:'history',patientId:p.id,returnTo:flowPage});}}
+                    className="text-sm font-medium text-gray-600 hover:text-blue-600 px-2.5 py-2 rounded-lg hover:bg-white">記録一覧</button>
+                  <button onClick={e=>{e.stopPropagation();nav({p:'patientForm',patientId:p.id,returnTo:flowPage});}}
+                    className="p-2 text-gray-500 hover:text-green-600 hover:bg-white rounded-lg text-lg" title="編集">⚙️</button>
+                  <button onClick={e=>{e.stopPropagation();setDel(p.id);}}
+                    className="p-2 text-gray-400 hover:text-red-500 hover:bg-white rounded-lg text-lg" title="削除">🗑️</button>
+                </div>
+              </div>
             );
           })}
+          {sorted.length===0 && <div className="text-center py-10 text-gray-400 text-sm">患者が見つかりません</div>}
         </div>
       </div>
+      {del && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={()=>setDel(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-bold text-gray-900 mb-2">この患者を削除しますか？</h3>
+            <p className="text-sm text-gray-500 mb-6">評価記録もすべて削除されます。この操作は取り消せません。</p>
+            <div className="flex gap-3">
+              <Btn onClick={()=>setDel(null)} variant="gray" cls="flex-1">キャンセル</Btn>
+              <Btn onClick={()=>{deletePatient(del);setDel(null);}} variant="danger" cls="flex-1">削除する</Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 function InfoBanner({text}) {
   return <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-800">{text}</div>;
 }
+// 検査間隔3か月警告バナー（warn=testIntervalWarn()の戻り値。nullなら非表示）
+function TestIntervalWarn({warn}){ if(!warn) return null;
+  return <div className="mt-1 mb-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">⚠ 前回検査（{warn.prev}）から3か月未満 — 検査料は算定できません（次回算定可能：{warn.next}）</div>; }
 
 // ═══════════════════════════════════════════════
 // PAGE: HOME
@@ -1425,6 +1724,11 @@ function ElderIcon({size=112}) {
 
 function Home() {
   const nav = useNav();
+  const {assessments} = useS();
+  // バックアップ経過警告：14日以上=黄 / 30日以上=赤。評価が1件も無ければ表示しない
+  const bk = load('lastBackupAt',null);
+  const days = bk ? Math.floor((Date.now()-new Date(bk).getTime())/86400000) : Infinity;
+  const level = assessments.length===0 ? null : days>=30 ? 'red' : days>=14 ? 'yellow' : null;
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50 to-gray-50 flex flex-col">
       <header className="bg-white shadow-sm px-6 py-4 flex items-center justify-between">
@@ -1437,14 +1741,17 @@ function Home() {
         </div>
         <button onClick={()=>nav({p:'settings'})} className="p-2 rounded-full hover:bg-gray-100 text-gray-500 text-xl" title="設定">⚙️</button>
       </header>
-      <div className="px-6 pt-6">
-        <button onClick={()=>nav({p:'patients'})}
-          className="w-full flex items-center gap-3 bg-white border border-gray-200 rounded-xl px-5 py-3 shadow-sm hover:bg-blue-50 hover:border-blue-300 transition-colors">
-          <span className="text-xl">👥</span>
-          <span className="font-medium text-gray-800">患者管理（登録・編集）</span>
-          <span className="ml-auto text-gray-400">›</span>
-        </button>
-      </div>
+      {level && (
+        <div className={`px-6 py-3 flex items-center gap-3 border-b ${level==='red'?'bg-red-50 border-red-200':'bg-amber-50 border-amber-200'}`}>
+          <span className={`text-sm flex-1 ${level==='red'?'text-red-800':'text-amber-800'}`}>
+            ⚠ {bk
+              ? `最終バックアップから${days}日経過しています。データ消失に備えて書き出してください。`
+              : 'バックアップが一度も行われていません。データ消失に備えて書き出してください。'}
+          </span>
+          <button onClick={()=>nav({p:'settings'})}
+            className={`flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white ${level==='red'?'bg-red-600 hover:bg-red-700':'bg-amber-600 hover:bg-amber-700'}`}>設定へ →</button>
+        </div>
+      )}
       <div className="px-6 pt-6 grid grid-cols-1 md:grid-cols-2 gap-5 flex-1">
         <button onClick={()=>nav({p:'pediatric'})}
           className="bg-white rounded-2xl shadow-md hover:shadow-lg hover:scale-[1.01] transition-all p-8 flex flex-col items-center gap-4 border border-transparent hover:border-orange-200">
@@ -1475,11 +1782,21 @@ function Home() {
 // ═══════════════════════════════════════════════
 function Settings() {
   const nav = useNav();
-  const {clinic, setClinic} = useS();
-  const [form, setForm] = useState({...clinic});
+  const {clinic, setClinic, patients, assessments} = useS();
+  // 担当者リストは後方互換のため未定義なら空配列扱い
+  const [form, setForm] = useState({doctors:[],hygienists:[],...clinic});
   const [saved, setSaved] = useState(false);
   const fileRef = useRef();
   const upd = (k,v) => setForm(p=>({...p,[k]:v}));
+  // 担当者（医師・衛生士）リストの追加・削除。登録順を保持
+  const [newDoctor, setNewDoctor] = useState('');
+  const [newHygienist, setNewHygienist] = useState('');
+  const addStaff = (key, setInput) => (name) => {
+    const v=(name||'').trim(); if(!v) return;
+    setForm(p=>({...p,[key]:[...(p[key]||[]), v]}));
+    setInput('');
+  };
+  const removeStaff = (key, idx) => setForm(p=>({...p,[key]:(p[key]||[]).filter((_,i)=>i!==idx)}));
   const inputCls = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400";
   const labelCls = "block text-sm font-medium text-gray-700 mb-1";
   // --- バックアップ（暗号化エクスポート／インポート）---
@@ -1491,22 +1808,40 @@ function Settings() {
   const [impName, setImpName] = useState('');
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState(null);
+  const [lastBackupAt, setLastBackupAt] = useState(()=>load('lastBackupAt',null)); // 最終バックアップ日時
+  // ストレージ使用状況（localStorage実測＋写真メタ集計＋IndexedDB件数＋端末割当）
+  const [storageInfo, setStorageInfo] = useState(null);
+  useEffect(()=>{ (async()=>{
+    let chars=0; for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); chars += k.length + (localStorage.getItem(k)||'').length; }
+    const bytes = chars*2; // UTF-16換算。Safariのおおよその上限は5MB
+    const metas = assessments.flatMap(a=>a.photos||[]);
+    let idbCount=null; try{ idbCount=(await listPhotoIds()).length; }catch(e){}
+    let est=null; try{ if(navigator.storage && navigator.storage.estimate) est=await navigator.storage.estimate(); }catch(e){}
+    // 患者・評価数はstoreから数える（サンプル患者は初回保存までlocalStorageに無いため）
+    setStorageInfo({bytes, patients:patients.length, asmts:assessments.length, photoN:metas.length, photoBytes:metas.reduce((s,p)=>s+(p.size||0),0), idbCount, est});
+  })(); },[]);
   const doExport = () => {
     setMsg(null);
     if(typeof CryptoJS==='undefined'){ setMsg({type:'err',text:'暗号化ライブラリを読み込めていません（初回はネット接続が必要です）'}); return; }
     if(expPw.length<4){ setMsg({type:'err',text:'パスワードは4文字以上で設定してください'}); return; }
     if(expPw!==expPw2){ setMsg({type:'err',text:'確認用パスワードが一致しません'}); return; }
-    setBusy('暗号化して書き出しています…');
-    setTimeout(()=>{
+    setBusy('写真を集めて暗号化しています…（写真が多いと数秒かかります）');
+    // 写真同梱でメモリ・暗号化に時間がかかるためasync。setTimeoutでbusy表示を先に反映。
+    setTimeout(async ()=>{
       try {
-        const fileObj = makeEncryptedBackup(expPw);
-        const blob = new Blob([JSON.stringify(fileObj,null,2)], {type:'application/json'});
+        const fileObj = await makeEncryptedBackup(expPw);   // 写真同梱（schema:2）。async。
+        const json = JSON.stringify(fileObj,null,2);
+        const mb = Math.round(json.length/1024/1024*10)/10; // 概算サイズ（MB）
+        const blob = new Blob([json], {type:'application/json'});
         const url = URL.createObjectURL(blob);
         const d=new Date(), ymd=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
         const a=document.createElement('a'); a.href=url; a.download=`口腔機能管理_backup_${ymd}.json`;
         document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
         setExpPw(''); setExpPw2('');
-        setMsg({type:'ok',text:`書き出しました（患者${fileObj.counts.patients}名・評価${fileObj.counts.assessments}件）。パスワードは大切に保管してください。`});
+        const warn = mb>=50 ? `\n⚠ ファイルが大きめ（約${mb}MB）です。保存先の空き容量にご注意ください。` : '';
+        setMsg({type:'ok',text:`書き出しました（患者${fileObj.counts.patients}名・評価${fileObj.counts.assessments}件・写真${fileObj.counts.photos||0}枚／約${mb}MB）。パスワードは大切に保管してください。${warn}`});
+        // バックアップ実施を記録（Home/Settingsの経過警告に利用）
+        const nowIso=new Date().toISOString(); save('lastBackupAt',nowIso); setLastBackupAt(nowIso);
       } catch(e){ setMsg({type:'err',text:'書き出しに失敗しました：'+e.message}); }
       setBusy('');
     }, 60);
@@ -1524,16 +1859,27 @@ function Settings() {
     if(!impFile){ setMsg({type:'err',text:'復元するファイルを選んでください'}); return; }
     if(!impPw){ setMsg({type:'err',text:'バックアップのパスワードを入力してください'}); return; }
     setBusy('復号して復元しています…');
-    setTimeout(()=>{
+    // 写真の書き戻しを待ってからreloadするためasync。
+    setTimeout(async ()=>{
       try {
         const payload = readEncryptedBackup(impFile, impPw);
-        const np=(payload.data.patients||[]).length, na=(payload.data.assessments||[]).length;
+        const photoMap = payload.data.photos || {};               // schema:1には無い（写真なし＝後方互換）
+        const np=(payload.data.patients||[]).length, na=(payload.data.assessments||[]).length, nphoto=Object.keys(photoMap).length;
         setBusy('');
         const when = payload.exportedAt ? new Date(payload.exportedAt).toLocaleString('ja-JP') : '不明';
-        if(!window.confirm(`復元すると、この端末の現在のデータ（患者・評価・医院設定）は全て置き換わります。\n\nこのバックアップの内容：患者${np}名・評価${na}件\n作成日時：${when}\n\n全置き換えしてよろしいですか？`)) return;
+        if(!window.confirm(`復元すると、この端末の現在のデータ（患者・評価・医院設定・顔貌写真）は全て置き換わります。\n\nこのバックアップの内容：患者${np}名・評価${na}件・写真${nphoto}枚\n作成日時：${when}\n\n全置き換えしてよろしいですか？`)) return;
+        setBusy(`復元しています…（写真${nphoto}枚を書き戻し中）`);
         save('patients', payload.data.patients||[]);
         save('assessments', payload.data.assessments||[]);
         save('clinic', payload.data.clinic||{});
+        // 写真ストアを全クリア→バックアップの写真を書き戻し（全置き換えセマンティクス）。完了まで必ずawait。
+        try {
+          await clearAllPhotos();
+          for(const id of Object.keys(photoMap)){ await putPhoto(id, photoMap[id]); }
+        } catch(pe){ window.alert('写真の復元に一部失敗しました：'+(pe&&pe.message?pe.message:'不明なエラー')); }
+        setBusy('');
+        // 復元直後にバックアップ警告が出る混乱を防ぐため、復元時刻をlastBackupAtに記録
+        save('lastBackupAt', new Date().toISOString());
         window.alert('復元しました。画面を再読み込みします。');
         location.reload();
       } catch(e){ setBusy(''); setMsg({type:'err',text:'復元に失敗しました：'+e.message+'（パスワードやファイルをご確認ください）'}); }
@@ -1561,6 +1907,38 @@ function Settings() {
             <label className={labelCls}>電話番号</label>
             <input type="tel" value={form.phone||''} onChange={e=>upd('phone',e.target.value)} placeholder="例）03-0000-0000" className={inputCls}/>
           </div>
+        </div>
+        {/* 担当者の登録：評価開始時に選択する担当医師・担当衛生士の候補リスト */}
+        <div className="bg-white rounded-2xl shadow-sm p-6 space-y-5">
+          <div>
+            <h2 className="font-semibold text-gray-800">👥 担当者の登録</h2>
+            <p className="text-xs text-gray-500 mt-1">評価開始時に選ぶ「担当医師」「担当衛生士」の候補を登録します（管理計画書に印字されます）。</p>
+          </div>
+          {[
+            {key:'doctors', title:'担当医師', input:newDoctor, setInput:setNewDoctor, ph:'例）田中 一郎'},
+            {key:'hygienists', title:'担当衛生士', input:newHygienist, setInput:setNewHygienist, ph:'例）佐藤 花子'},
+          ].map(grp=>(
+            <div key={grp.key} className="border border-gray-100 rounded-xl p-4 space-y-3">
+              <p className="text-sm font-medium text-gray-700">{grp.title}</p>
+              <div className="flex gap-2">
+                <input type="text" value={grp.input} onChange={e=>grp.setInput(e.target.value)}
+                  onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();addStaff(grp.key,grp.setInput)(grp.input);}}}
+                  placeholder={grp.ph} className={inputCls}/>
+                <button onClick={()=>addStaff(grp.key,grp.setInput)(grp.input)}
+                  className="flex-shrink-0 px-4 py-3 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">追加</button>
+              </div>
+              {(form[grp.key]||[]).length===0
+                ? <p className="text-xs text-gray-400">未登録</p>
+                : <div className="space-y-1.5">
+                    {(form[grp.key]||[]).map((nm,i)=>(
+                      <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50">
+                        <span className="flex-1 text-sm text-gray-800">{nm}</span>
+                        <button onClick={()=>removeStaff(grp.key,i)} className="p-1 text-gray-400 hover:text-red-500 rounded text-lg" title="削除">🗑️</button>
+                      </div>
+                    ))}
+                  </div>}
+            </div>
+          ))}
         </div>
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-4">
           <h2 className="font-semibold text-gray-800">🖼️ クリニックロゴ</h2>
@@ -1593,6 +1971,7 @@ function Settings() {
           <div>
             <h2 className="font-semibold text-gray-800">🔒 データのバックアップ</h2>
             <p className="text-xs text-gray-500 mt-1">患者・評価記録・医院設定をパスワード付きファイルに書き出し／復元します。端末の買い替えやデータ移動、万一の消失に備えてください。データは各端末のブラウザ内にのみ保存されます。</p>
+            <p className="text-xs mt-1.5 font-medium text-gray-600">最終バックアップ：<span className={lastBackupAt?'text-gray-700':'text-red-600'}>{lastBackupAt?formatDate(lastBackupAt):'未実施'}</span></p>
           </div>
           {msg && <div className={`rounded-xl px-4 py-3 text-sm ${msg.type==='ok'?'bg-green-50 text-green-700':'bg-red-50 text-red-700'}`}>{msg.text}</div>}
           {busy && <div className="rounded-xl px-4 py-3 text-sm bg-blue-50 text-blue-700">⏳ {busy}</div>}
@@ -1614,77 +1993,51 @@ function Settings() {
             <p className="text-xs text-rose-600">⚠️ 復元すると、この端末の現在のデータは全て置き換わります。</p>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
 
-// ═══════════════════════════════════════════════
-// PAGE: PATIENTS
-// ═══════════════════════════════════════════════
-function Patients() {
-  const nav = useNav();
-  const {patients, deletePatient} = useS();
-  const [q, setQ] = useState('');
-  const [del, setDel] = useState(null);
-  const filtered = patients.filter(p=>{
-    const lq=q.toLowerCase();
-    return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.no.toLowerCase().includes(lq)||(p.chartNo||'').toLowerCase().includes(lq);
-  });
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <Header onBack={()=>nav({p:'home'})} backLabel="トップに戻る" title="患者管理" sub="評価対象の患者を登録・編集します"/>
-      <div className="max-w-3xl mx-auto px-6 py-6 space-y-4">
-        <div className="flex gap-3">
-          <Btn onClick={()=>nav({p:'patientForm'})}>➕ 新規患者を追加</Btn>
-        </div>
-        <p className="text-sm text-gray-500">登録者数: {patients.length}名</p>
-        <input type="search" value={q} onChange={e=>setQ(e.target.value)}
-          placeholder="カルテ番号、氏名、フリガナで検索"
-          className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"/>
-        <div className="space-y-2">
-          {filtered.map(p=>{
-            const age=computeAge(p.birth);
-            const isPed=age.years<18;
+        {/* ストレージ使用状況：メインデータ（localStorage）と写真（IndexedDB）の使用量を可視化 */}
+        <div className="bg-white rounded-2xl shadow-sm p-6 space-y-4">
+          <div>
+            <h2 className="font-semibold text-gray-800">📊 ストレージ使用状況</h2>
+            <p className="text-xs text-gray-500 mt-1">この端末のブラウザに保存されているデータ量の目安です。</p>
+          </div>
+          {!storageInfo ? <p className="text-sm text-gray-400">計測中…</p> : (()=>{
+            const LIMIT = 5*1024*1024; // Safariのおおよその上限 5MB
+            const mb = storageInfo.bytes/1024/1024;
+            const pct = Math.min(100, Math.round(storageInfo.bytes/LIMIT*1000)/10);
+            const photoMb = storageInfo.photoBytes/1024/1024;
+            const tight = storageInfo.bytes>=4.5*1024*1024 ? 'red' : storageInfo.bytes>=4*1024*1024 ? 'amber' : null;
+            const barCls = tight==='red'?'bg-red-500':tight==='amber'?'bg-amber-500':'bg-blue-500';
             return (
-              <div key={p.id} className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-4 flex items-center gap-4">
-                <div className="w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-xl flex-shrink-0">
-                  {isPed?'👶':'👤'}
+              <div className="space-y-4">
+                <div className="flex gap-6 text-sm">
+                  <div><span className="text-gray-500">患者数</span> <span className="font-semibold text-gray-800">{storageInfo.patients}名</span></div>
+                  <div><span className="text-gray-500">評価数</span> <span className="font-semibold text-gray-800">{storageInfo.asmts}件</span></div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    {p.chartNo
-                      ? <span className="text-xs font-mono font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">No.{p.chartNo}</span>
-                      : <span className="text-xs text-gray-400 font-mono">{p.no}</span>}
-                    <span className="font-semibold text-gray-900 truncate">{p.name}</span>
+                <div>
+                  <div className="flex justify-between text-sm mb-1">
+                    <span className="text-gray-600">メインデータ</span>
+                    <span className="font-medium text-gray-800">{mb.toFixed(2)}MB / 5MB（{pct}%）</span>
                   </div>
-                  <p className="text-xs text-gray-400">{p.kana}</p>
-                  <p className="text-xs text-gray-500">{age.label} / {p.gender==='male'?'男性':'女性'}</p>
+                  <div className="w-full h-2 rounded-full bg-gray-100 overflow-hidden">
+                    <div className={`h-2 rounded-full ${barCls}`} style={{width:`${Math.max(2,pct)}%`}}/>
+                  </div>
+                  {tight==='amber' && <p className="text-xs text-amber-600 mt-1.5">⚠️ 容量が逼迫しています。古い評価の整理やバックアップをご検討ください。</p>}
+                  {tight==='red' && <p className="text-xs text-red-600 font-medium mt-1.5">🚨 容量がほぼ上限です。これ以上の保存に失敗する恐れがあります。早急にバックアップし、不要な評価を整理してください。</p>}
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <button onClick={()=>nav({p:'history',patientId:p.id})} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="評価履歴">📋</button>
-                  <button onClick={()=>nav({p:isPed?'pediatric':'adult',patientId:p.id})} className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg" title="評価開始">▶</button>
-                  <button onClick={()=>nav({p:'patientForm',patientId:p.id})} className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">編集</button>
-                  <button onClick={()=>setDel(p.id)} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="削除">🗑️</button>
+                <div className="text-sm text-gray-600">
+                  写真：<span className="font-medium text-gray-800">{storageInfo.photoN}枚</span>
+                  {storageInfo.idbCount!=null && <span className="text-gray-400">（保存済み{storageInfo.idbCount}件）</span>}
+                  ・約<span className="font-medium text-gray-800">{photoMb.toFixed(1)}MB</span>
+                  <span className="text-xs text-gray-400">（IndexedDB・別枠）</span>
                 </div>
+                {storageInfo.est && storageInfo.est.quota>0 && (
+                  <div className="text-xs text-gray-400">端末割当（参考）：使用 {(storageInfo.est.usage/1024/1024).toFixed(0)}MB / 割当 {(storageInfo.est.quota/1024/1024).toFixed(0)}MB</div>
+                )}
               </div>
             );
-          })}
-          {filtered.length===0 && <div className="text-center py-12 text-gray-400">患者が見つかりません</div>}
+          })()}
         </div>
       </div>
-      {del && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl">
-            <h3 className="font-bold text-gray-900 mb-2">患者を削除しますか？</h3>
-            <p className="text-sm text-gray-500 mb-6">全評価データも削除されます。この操作は取り消せません。</p>
-            <div className="flex gap-3">
-              <Btn onClick={()=>setDel(null)} variant="gray" cls="flex-1">キャンセル</Btn>
-              <Btn onClick={()=>{deletePatient(del);setDel(null);}} variant="danger" cls="flex-1">削除する</Btn>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1692,7 +2045,7 @@ function Patients() {
 // ═══════════════════════════════════════════════
 // PAGE: PATIENT FORM
 // ═══════════════════════════════════════════════
-function PatientForm({patientId}) {
+function PatientForm({patientId, returnTo}) {
   const nav = useNav();
   const {patients, addPatient, updatePatient, nextNo} = useS();
   const existing = patientId ? patients.find(p=>p.id===patientId) : null;
@@ -1703,6 +2056,39 @@ function PatientForm({patientId}) {
   const [errs, setErrs] = useState({});
   const [saved, setSaved] = useState(false);
   const set = (k,v) => setForm(p=>({...p,[k]:v}));
+  const back = () => nav(returnTo ? {p:returnTo} : {p:'home'});
+  // ── フリガナ自動入力（autokana方式）──
+  // IME変換確定前のひらがな列をフィールド別に保持し、確定時にカタカナ化してフリガナ欄へ追記。
+  const kanaBuf = useRef({sei:'', mei:''}); // 変換中ひらがなの一時保持
+  // フリガナ欄を手動編集したら自動入力を停止。既存患者で既にフリガナがあれば最初から停止。
+  const kanaLock = useRef({seiKana: !!exSeiK, meiKana: !!exMeiK});
+  const toKatakana = hira2kata; // モジュール関数に統一
+  // 氏名欄のcompositionUpdate：変換前のひらがな列だけを拾って保持
+  const onNameCompUpdate = (field) => (e) => {
+    if(/^[ぁ-んー・\s]*$/.test(e.data||'')) kanaBuf.current[field] = e.data||'';
+  };
+  // 氏名欄のcompositionEnd：保持したひらがなをカタカナ化し、未ロックなら対応フリガナ欄へ追記
+  const onNameCompEnd = (field, kanaField) => (e) => {
+    const buf = kanaBuf.current[field]; kanaBuf.current[field] = '';
+    if(kanaLock.current[kanaField] || !buf) return;
+    const kata = toKatakana(buf);
+    if(!kata) return;
+    setForm(p=>({...p, [kanaField]: (p[kanaField]||'') + kata}));
+  };
+  // 氏名欄が空になったらフリガナも空にリセット（未ロック時のみ）
+  const onNameChange = (field, kanaField) => (e) => {
+    const v = e.target.value;
+    setForm(p=>{
+      const next = {...p, [field]: v};
+      if(v==='' && !kanaLock.current[kanaField]) next[kanaField] = '';
+      return next;
+    });
+  };
+  // フリガナ欄を直接編集したら以後の自動入力を停止
+  const onKanaChange = (kanaField) => (e) => {
+    kanaLock.current[kanaField] = true;
+    set(kanaField, e.target.value);
+  };
   // 生年月日を 元号/年/月/日 に分解して管理（和暦リスト式入力）
   const parseBirth = s => {
     if(!(s && /^\d{4}-\d{2}-\d{2}$/.test(s))) return {era:'', ey:'', m:'', d:''};
@@ -1739,12 +2125,12 @@ function PatientForm({patientId}) {
     const payload = {...form, name:`${form.sei.trim()} ${form.mei.trim()}`, kana:`${form.seiKana.trim()} ${form.meiKana.trim()}`};
     if(existing) updatePatient({...existing,...payload});
     else addPatient({id:generateId(),no:nextNo(),...payload,createdAt:new Date().toISOString()});
-    setSaved(true); setTimeout(()=>nav({p:'patients'}),800);
+    setSaved(true); setTimeout(back,800);
   };
   const ic = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400";
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header onBack={()=>nav({p:'patients'})} backLabel="患者一覧に戻る" title={existing?'患者情報の編集':'新規患者を追加'}/>
+      <Header onBack={back} backLabel="戻る" title={existing?'患者情報の編集':'新規患者を追加'}/>
       <div className="max-w-xl mx-auto px-6 py-8 space-y-5">
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-5">
           {existing && <p className="text-sm text-gray-500">患者番号: <span className="font-mono font-bold text-gray-800">{existing.no}</span></p>}
@@ -1755,17 +2141,18 @@ function PatientForm({patientId}) {
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">氏名 *</label>
             <div className="grid grid-cols-2 gap-3">
-              <input type="text" value={form.sei} onChange={e=>set('sei',e.target.value)} placeholder="姓）山田" className={ic}/>
-              <input type="text" value={form.mei} onChange={e=>set('mei',e.target.value)} placeholder="名）太郎" className={ic}/>
+              <input type="text" value={form.sei} onChange={onNameChange('sei','seiKana')} onCompositionUpdate={onNameCompUpdate('sei')} onCompositionEnd={onNameCompEnd('sei','seiKana')} placeholder="姓）山田" className={ic}/>
+              <input type="text" value={form.mei} onChange={onNameChange('mei','meiKana')} onCompositionUpdate={onNameCompUpdate('mei')} onCompositionEnd={onNameCompEnd('mei','meiKana')} placeholder="名）太郎" className={ic}/>
             </div>
             {(errs.sei||errs.mei) && <p className="text-xs text-red-500 mt-1">{errs.sei||errs.mei}</p>}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">フリガナ *</label>
             <div className="grid grid-cols-2 gap-3">
-              <input type="text" value={form.seiKana} onChange={e=>set('seiKana',e.target.value)} placeholder="セイ）ヤマダ" className={ic}/>
-              <input type="text" value={form.meiKana} onChange={e=>set('meiKana',e.target.value)} placeholder="メイ）タロウ" className={ic}/>
+              <input type="text" value={form.seiKana} onChange={onKanaChange('seiKana')} placeholder="セイ）ヤマダ" className={ic}/>
+              <input type="text" value={form.meiKana} onChange={onKanaChange('meiKana')} placeholder="メイ）タロウ" className={ic}/>
             </div>
+            <p className="text-xs text-gray-400 mt-1">氏名を入力すると自動で入ります（修正可）</p>
             {errs.kana && <p className="text-xs text-red-500 mt-1">{errs.kana}</p>}
           </div>
           <div>
@@ -1828,25 +2215,160 @@ function PatientForm({patientId}) {
 }
 
 // ═══════════════════════════════════════════════
+// SHARED MODALS（フロー共通）
+// ═══════════════════════════════════════════════
+// 担当者選択モーダル：担当医師・担当衛生士を設定リストから選ぶ。初期選択は各リスト先頭
+function StaffSelectModal({docList, hygList, doc, setDoc, hyg, setHyg, onConfirm}) {
+  const selCls = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400";
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6">
+      <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+        <h3 className="font-bold text-gray-900 mb-4">担当者を選択</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">担当医師</label>
+            {docList.length===0
+              ? <p className="text-sm text-gray-400">未登録</p>
+              : <select value={doc} onChange={e=>setDoc(e.target.value)} className={selCls}>
+                  {docList.map(d=><option key={d} value={d}>{d}</option>)}
+                </select>}
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">担当衛生士</label>
+            {hygList.length===0
+              ? <p className="text-sm text-gray-400">未登録</p>
+              : <select value={hyg} onChange={e=>setHyg(e.target.value)} className={selCls}>
+                  {hygList.map(h=><option key={h} value={h}>{h}</option>)}
+                </select>}
+          </div>
+        </div>
+        <div className="mt-6"><Btn onClick={onConfirm} cls="w-full">決定</Btn></div>
+      </div>
+    </div>
+  );
+}
+// 入力途中の「トップに戻る」警告モーダル
+function UnsavedBackModal({onLeave, onStay}) {
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={onStay}>
+      <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+        <h3 className="font-bold text-gray-900 mb-2">入力途中です</h3>
+        <p className="text-sm text-gray-500 mb-6">今入力したデータはまだ保存されていません。</p>
+        <div className="flex gap-3">
+          <Btn onClick={onLeave} variant="danger" cls="flex-1">保存せずに戻る</Btn>
+          <Btn onClick={onStay} cls="flex-1">入力を続ける</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 顔貌写真の添付UI（小児フロー専用・最大4枚・画面表示のみ）
+//   photos: [{id,date,size,dataURL?,missing?}]  onAdd(FileList)  onRemove(id)  ro:閲覧モード
+function PhotoAttach({photos, onAdd, onRemove, ro}) {
+  const MAX = 4;
+  const inputRef = useRef();
+  const [busy, setBusy] = useState(false);   // 圧縮処理中
+  const [err, setErr] = useState('');        // エラー表示
+  const [zoom, setZoom] = useState(null);    // 拡大表示中のdataURL
+  const list = photos || [];
+  const remain = Math.max(0, MAX - list.length);
+  const onPick = async (e) => {
+    const files = e.target.files;
+    e.target.value = ''; // 同じファイルを連続選択できるようにクリア
+    if(!files || !files.length) return;
+    setErr('');
+    setBusy(true);
+    try { await onAdd(files); }
+    catch(ex){ setErr('写真の追加に失敗しました：'+(ex&&ex.message?ex.message:'不明なエラー')); }
+    setBusy(false);
+  };
+  return (
+    <div>
+      <input ref={inputRef} type="file" accept="image/*" multiple data-testid="ped-photo-input" className="hidden" onChange={onPick}/>
+      {list.length>0 && (
+        <div className="grid grid-cols-4 gap-2 mb-2">
+          {list.map(p=>(
+            <div key={p.id} className="relative">
+              {p.missing ? (
+                // IndexedDBで見つからなかった写真（自己修復用タイル）
+                <div className="aspect-square rounded-lg border bg-gray-100 flex flex-col items-center justify-center text-gray-400 text-2xl">
+                  <span>📷</span><span className="text-[10px] mt-0.5">画像なし</span>
+                </div>
+              ) : (
+                <img src={p.dataURL} alt="顔貌写真" onClick={()=>setZoom(p.dataURL)}
+                  className="aspect-square object-cover rounded-lg border cursor-zoom-in w-full"/>
+              )}
+              {!ro && (
+                <button type="button" onClick={()=>onRemove(p.id)}
+                  className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-red-500 text-white text-xs flex items-center justify-center shadow"
+                  title="削除">🗑️</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {err && <p className="text-xs text-red-600 mb-2">{err}</p>}
+      {!ro && remain>0 && (
+        <button type="button" disabled={busy} onClick={()=>inputRef.current&&inputRef.current.click()}
+          className={`w-full text-sm font-medium rounded-xl px-4 py-2.5 border-2 border-dashed ${busy?'border-gray-200 text-gray-400':'border-blue-300 text-blue-600 hover:bg-blue-50'}`}>
+          {busy ? '⏳ 処理中…' : `📷 写真を追加（あと${remain}枚）`}
+        </button>
+      )}
+      {list.length>=MAX && !ro && <p className="text-xs text-gray-400">最大{MAX}枚まで添付できます</p>}
+      {ro && list.length===0 && <p className="text-xs text-gray-400">添付された写真はありません</p>}
+      {/* 拡大モーダル（背景タップで閉じる） */}
+      {zoom && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={()=>setZoom(null)}>
+          <img src={zoom} alt="顔貌写真（拡大）" className="max-w-full max-h-full rounded-lg" onClick={e=>e.stopPropagation()}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
 // PAGE: PEDIATRIC FLOW
 // ═══════════════════════════════════════════════
 const PED_STEPS = [{key:'questionnaire',label:'問診・検査'},{key:'scoring',label:'算定判定'},{key:'training',label:'処方'}];
 
-function PediatricFlow({patientId:initPid}) {
+function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const nav = useNav();
-  const {patients, assessments, addAssessment, updateAssessment} = useS();
-  const [step, setStep] = useState(initPid?'questionnaire':'select');
-  const [pid, setPid] = useState(initPid||'');
+  const showToast = useToast();
+  const {patients, assessments, addAssessment, updateAssessment, clinic, getAssessment} = useS();
+  const ro = mode==='view'; // 閲覧モード（読み取り専用）
+  // 過去評価の読み込み：assessmentId があれば該当評価を取得して全stateを復元する
+  const loaded = assessmentId ? getAssessment(assessmentId) : null;
+  const isLoaded = !!loaded; // 過去評価を開いている（新規ではない）
+  const [step, setStep] = useState((initPid||isLoaded)?'questionnaire':'select');
+  const [pid, setPid] = useState(loaded?loaded.patientId:(initPid||''));
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
-  const [checkedC, setCheckedC] = useState([]);
-  const [lip3, setLip3] = useState(['','','']); // りっぷるくん3回測定。平均が測定値
-  const [tongue3, setTongue3] = useState(['','','']); // JMS舌圧3回測定。平均が測定値
-  const [height, setHeight] = useState('');
-  const [weight, setWeight] = useState('');
-  const [notes, setNotes] = useState('');
-  const [savedId, setSavedId] = useState(null);
+  const [checkedC, setCheckedC] = useState(loaded?(loaded.checkedCItems||[]):[]);
+  const [lip3, setLip3] = useState(loaded?(loaded.lipForces3||[loaded.lipClosureForce||'','','']):['','','']); // りっぷるくん3回測定。平均が測定値
+  const [tongue3, setTongue3] = useState(loaded?(loaded.tonguePres3||[loaded.maxTonguePressure||'','','']):['','','']); // JMS舌圧3回測定。平均が測定値
+  const [height, setHeight] = useState(loaded?(loaded.height||''):'');
+  const [weight, setWeight] = useState(loaded?(loaded.weight||''):'');
+  const [notes, setNotes] = useState(loaded?(loaded.notes||''):'');
+  const [savedId, setSavedId] = useState(assessmentId||null); // 読込時は savedId=評価ID → 保存は updateAssessment
   const [collapsed, setCollapsed] = useState(new Set());
-  const [phaseOverride, setPhaseOverride] = useState(null); // null=年齢で自動 / 'pre' / 'post'
+  const [phaseOverride, setPhaseOverride] = useState(loaded?(loaded.phase==='pre'?'pre':'post'):null); // null=年齢で自動 / 'pre' / 'post'
+  const [phaseSwitch, setPhaseSwitch] = useState(null); // 別紙切替の確認モーダル対象（'pre'/'post'/'auto'）
+  // 担当者（評価時に選択）。読込時は評価データから復元
+  const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
+  const [staffHygienist, setStaffHygienist] = useState(loaded?(loaded.staffHygienist||''):'');
+  const [showStaff, setShowStaff] = useState(false); // 担当者選択モーダル
+  const [showBackWarn, setShowBackWarn] = useState(false); // 入力途中の戻る警告
+  // 顔貌写真（最大4枚・画面表示のみ）。各要素 {id,date,size,dataURL?,missing?}
+  //   新規追加分はメモリ上にdataURLを保持し、doSave時に初めてIndexedDBへput（孤児ゼロ方式）。
+  const [photos, setPhotos] = useState(loaded?(loaded.photos||[]).map(p=>({...p})):[]);
+  const [deletedPhotoIds, setDeletedPhotoIds] = useState([]); // 保存済みから削除されたid（doSave時にIDBから削除）
+  const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
+  // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
+  const [tmpDoc, setTmpDoc] = useState('');
+  const [tmpHyg, setTmpHyg] = useState('');
+  // モーダルを開いたら先頭を初期選択にセット
+  useEffect(()=>{ if(showStaff){ setTmpDoc(docList[0]||''); setTmpHyg(hygList[0]||''); } }, [showStaff]);
+  const confirmStaff = () => { setStaffDoctor(tmpDoc); setStaffHygienist(tmpHyg); setShowStaff(false); };
 
   const patient = patients.find(p=>p.id===pid);
   const age = patient ? computeAge(patient.birth) : null;
@@ -1861,18 +2383,32 @@ function PediatricFlow({patientId:initPid}) {
   // りっぷるくん：入力済みの回の平均が測定値（小数1位）。1回でも入っていれば算出
   const lip3nums = lip3.map(parseFloat).filter(x=>!isNaN(x));
   const lipForce = lip3nums.length ? (Math.round(lip3nums.reduce((a,b)=>a+b,0)/lip3nums.length*10)/10).toFixed(1) : '';
-  const setLip = (i,v) => setLip3(p=>{const n=[...p];n[i]=v;return n;});
+  // 閲覧モード（ro）では各入力を無効化
+  const setLip = (i,v) => { if(ro) return; setLip3(p=>{const n=[...p];n[i]=v;return n;}); };
   // JMS舌圧：入力済みの回の平均が測定値（小数1位）
   const tongue3nums = tongue3.map(parseFloat).filter(x=>!isNaN(x));
   const tonguePres = tongue3nums.length ? (Math.round(tongue3nums.reduce((a,b)=>a+b,0)/tongue3nums.length*10)/10).toFixed(1) : '';
-  const setTongue = (i,v) => setTongue3(p=>{const n=[...p];n[i]=v;return n;});
+  const setTongue = (i,v) => { if(ro) return; setTongue3(p=>{const n=[...p];n[i]=v;return n;}); };
+  // 閲覧モードガード付きセッター（身長・体重・メモ）
+  const setHeightRO = v => { if(ro) return; setHeight(v); };
+  const setWeightRO = v => { if(ro) return; setWeight(v); };
+  const setNotesRO = v => { if(ro) return; setNotes(v); };
   const lipLow = lipForce!=='' && lipNorm && parseFloat(lipForce) <= lipNorm.minus1sd;       // -1SD以下で不足
   const tongueLow = tonguePres!=='' && tongueNorm && parseFloat(tonguePres) <= tongueNorm.cutoff; // cut-off値以下で低舌圧
   const scoring = useMemo(()=>computePediatricScoring(checkedC, cItems),[checkedC, cItems]);
   const diagnosis = useMemo(()=>computePediatricDiagnosis(checkedItemObjs, lipLow, tongueLow),[checkedC, cItems, lipLow, tongueLow]);
 
-  const toggleC = id => setCheckedC(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
-  const toggleGroup = g => setCollapsed(p=>{const n=new Set(p);n.has(g)?n.delete(g):n.add(g);return n;});
+  // 各セッターは閲覧モード（ro）ではガードして変更を無効化する
+  const toggleC = id => { if(ro) return; setCheckedC(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]); };
+  const toggleGroup = g => setCollapsed(p=>{const n=new Set(p);n.has(g)?n.delete(g):n.add(g);return n;}); // 折りたたみは閲覧でも可
+  // 別紙1/2の切替要求。別紙が実際に変わる かつ チェック済みがある時だけ確認モーダルを出す
+  const reqPhase = (t) => { if(ro) return;
+    const target = t==='auto' ? (ageMonths!=null && ageMonths<18 ? 'pre':'post') : t;
+    const cur = isPreWeaning ? 'pre':'post';
+    if(target===cur){ setPhaseOverride(t==='auto'?null:t); return; } // 別紙が変わらないなら確認・リセット不要
+    if(checkedC.length>0) setPhaseSwitch(t);
+    else setPhaseOverride(t==='auto'?null:t);
+  };
 
   // 前回の評価（同一患者の小児評価のうち最新。今セッションで保存した分は除く）
   const prevPed = useMemo(()=>{
@@ -1881,9 +2417,15 @@ function PediatricFlow({patientId:initPid}) {
       .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
   },[assessments, pid, savedId]);
 
+  // 検査間隔3か月警告（前回検査値が入った直近評価日から3暦月未満なら算定不可）。基準日は読込時=評価日、新規=本日
+  const baseDate = isLoaded && loaded ? loaded.date : new Date();
+  const warnLip = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.lipClosureForce, savedId), baseDate), [assessments, pid, savedId]);
+  const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.maxTonguePressure, savedId), baseDate), [assessments, pid, savedId]);
+
   // 患者が決まったら、検査値の初期値をセット：前回値があれば前回値、なければ年齢・性別の平均値
+  // ※過去評価の読み込み時（isLoaded）はプリセットしない（復元値を上書きしないため）
   useEffect(()=>{
-    if(!patient || !age || savedId) return;
+    if(!patient || !age || savedId || isLoaded) return;
     const yrs = age.years;
     const ln = lipForceNorm(yrs, patient.gender);   // 口唇閉鎖力の年齢性別平均
     const tn = pedTongueNorm(yrs);                   // 最大舌圧の年齢別平均
@@ -1897,42 +2439,107 @@ function PediatricFlow({patientId:initPid}) {
     setWeight(pv('weight')!=null ? snapToSpec('pedWeight', pv('weight')) : (gr ? snapToSpec('pedWeight', gr.w) : ''));
   }, [pid]);
 
+  // 過去評価の読込時：各写真idをIndexedDBから取得してdataURLを充填。見つからなければ「画像なし」タイル。
+  useEffect(()=>{
+    if(!loaded) return;
+    const metas = loaded.photos || [];
+    if(!metas.length) return;
+    let cancelled = false;
+    (async()=>{
+      const filled = [];
+      for(const m of metas){
+        try { const d = await getPhoto(m.id); filled.push(d!=null ? {...m, dataURL:d} : {...m, missing:true}); }
+        catch(e){ filled.push({...m, missing:true}); }
+      }
+      if(!cancelled) setPhotos(filled);
+    })();
+    return ()=>{ cancelled = true; };
+  }, [loaded]);
+
+  // 写真を追加：選択ファイルを順に圧縮（直列・メモリスパイク回避）。空き枚数までで打ち切る。
+  const addPhoto = async (fileList) => {
+    if(ro) return;
+    const files = Array.from(fileList);
+    const room = Math.max(0, 4 - photos.length);
+    if(room<=0) return;
+    const added = [];
+    for(const f of files.slice(0, room)){
+      const dataURL = await compressImageFile(f);          // 長辺1280px・JPEG0.75
+      added.push({ id:generateId(), date:new Date().toISOString(), size:dataURLBytes(dataURL), dataURL });
+    }
+    if(added.length) setPhotos(p=>[...p, ...added]);
+  };
+  // 写真を削除：保存済み（dataURLあり・missing含む既存）はdoSave時にIDBから消すためidを記録。
+  const removePhoto = (id) => {
+    if(ro) return;
+    setPhotos(p=>p.filter(x=>x.id!==id));
+    setDeletedPhotoIds(d=>[...d, id]);
+  };
+
   const doSave = () => {
-    const a = {id:savedId||generateId(),patientId:pid,date:new Date().toISOString(),type:'pediatric',
+    // 既存評価の更新時は元の日付を保持。新規作成時のみ現在日時をセット
+    const keepDate = (isLoaded && loaded) ? loaded.date : new Date().toISOString();
+    // 評価オブジェクトにはメタのみ保存（dataURLはIndexedDBへ）。missingタイルも参照として残す。
+    const photoMeta = photos.map(p=>({id:p.id, date:p.date, size:p.size}));
+    const a = {id:savedId||generateId(),patientId:pid,date:keepDate,type:'pediatric',
       phase:isPreWeaning?'pre':'post',
       checkedCItems:checkedC,lipClosureForce:lipForce,lipForces3:lip3,maxTonguePressure:tonguePres,tonguePres3:tongue3,
-      lipLow,tongueLow,height,weight,notes,scoring,diagnosis:{matchedPatterns:diagnosis}};
+      lipLow,tongueLow,height,weight,notes,scoring,diagnosis:{matchedPatterns:diagnosis},
+      staffDoctor,staffHygienist,photos:photoMeta};
     savedId ? updateAssessment(a) : addAssessment(a);
     if(!savedId) setSavedId(a.id);
+    // 写真のIDB反映（fire-and-forget・同期シグネチャ維持）：新規追加分をput、削除分をdelete。
+    const toPut = photos.filter(p=>p.dataURL && !p.missing).map(p=>({id:p.id, dataURL:p.dataURL}));
+    const toDel = deletedPhotoIds.slice();
+    if(toPut.length || toDel.length){
+      (async()=>{
+        try {
+          for(const p of toPut){ await putPhoto(p.id, p.dataURL); }
+          if(toDel.length) await deletePhotos(toDel);
+          setDeletedPhotoIds([]); // 反映済みをクリア
+        } catch(e){ alert('写真の保存に一部失敗しました：'+(e&&e.message?e.message:'不明なエラー')); }
+      })();
+    }
     return a.id;
   };
 
   const next = () => {
     const ord=['select','questionnaire','scoring','training'];
     const i=ord.indexOf(step);
-    if(step==='training'){const id=doSave();nav({p:'print',assessmentId:id});}
+    if(step==='training'){
+      // 閲覧モードは保存せず印刷プレビューへ。それ以外は保存して印刷
+      if(ro){ nav({p:'print',assessmentId:savedId}); }
+      else { const id=doSave(); showToast('保存しました'); nav({p:'print',assessmentId:id}); }
+    }
     else setStep(ord[i+1]);
   };
   const back = () => {
     const ord=['select','questionnaire','scoring','training'];
     const i=ord.indexOf(step);
-    if(i<=1&&!initPid) setStep('select');
+    if(i<=1&&!initPid&&!isLoaded) setStep('select');
     else setStep(ord[Math.max(0,i-1)]);
+  };
+  // ヘッダ「トップに戻る」：入力途中（未保存・閲覧でない）なら警告、それ以外は即home
+  const onBackHome = () => {
+    if(step!=='select' && !savedId && !ro){ setShowBackWarn(true); }
+    else nav({p:'home'});
   };
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <header className="bg-white shadow-sm px-6 py-4 flex items-center gap-4">
-        <button onClick={()=>nav({p:'home'})} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ トップに戻る</button>
+        <button onClick={onBackHome} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ トップに戻る</button>
         <div>
           <h1 className="text-lg font-bold text-gray-900">👶 口腔機能発達不全症</h1>
           {patient && age && <p className="text-xs text-gray-500">{patient.name}（{age.label} / {patient.gender==='male'?'男児':'女児'}）</p>}
         </div>
       </header>
-      {step!=='select' && <StepBar steps={PED_STEPS} current={step}/>}
+      {/* 閲覧モードのバナー（常時表示） */}
+      {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更できません）</div>}
+      {step!=='select' && <StepBar steps={PED_STEPS} current={step} onJump={k=>setStep(k)}/>}
       <div className="flex-1 overflow-y-auto">
 
-        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('questionnaire');}} selected={pid}/>}
+        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('questionnaire');setShowStaff(docList.length>0||hygList.length>0);}} selected={pid} flowPage="pediatric"/>}
 
         {step==='questionnaire' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
@@ -1943,9 +2550,9 @@ function PediatricFlow({patientId:initPid}) {
                 <p className="text-xs text-gray-500">{age?age.label+' / ':''}{phaseOverride?'手動選択中':'年齢から自動判定'}</p>
               </div>
               <div className="flex gap-1 items-center">
-                <button onClick={()=>{setPhaseOverride('pre');setCheckedC([]);}} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${isPreWeaning?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>離乳前</button>
-                <button onClick={()=>{setPhaseOverride('post');setCheckedC([]);}} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${!isPreWeaning?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>離乳後</button>
-                {phaseOverride && <button onClick={()=>setPhaseOverride(null)} className="px-2 py-1.5 rounded-lg text-xs text-gray-400" title="年齢からの自動判定に戻す">↺自動</button>}
+                <button disabled={ro} onClick={()=>reqPhase('pre')} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${isPreWeaning?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'} ${ro?'opacity-50':''}`}>離乳前</button>
+                <button disabled={ro} onClick={()=>reqPhase('post')} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${!isPreWeaning?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'} ${ro?'opacity-50':''}`}>離乳後</button>
+                {phaseOverride && !ro && <button onClick={()=>reqPhase('auto')} className="px-2 py-1.5 rounded-lg text-xs text-gray-400" title="年齢からの自動判定に戻す">↺自動</button>}
               </div>
             </div>
             <InfoBanner text="「食べる」「話す」機能のC項目（算定対象）で2項目以上該当し、中核群を1つ以上含むと算定要件を満たします。各項目をタップすると判定基準が表示されます。"/>
@@ -1975,9 +2582,10 @@ function PediatricFlow({patientId:initPid}) {
                             </div>
                             <p className="text-xs text-gray-400">{lipNorm?`${lipNorm.age}歳${lipNorm.gender==='f'?'女':'男'} 平均${lipNorm.mean}・-1SD ${lipNorm.minus1sd}N`:'りっぷるくん'}{prevPed&&prevPed.lipClosureForce?`／前回 ${prevPed.lipClosureForce}N`:''}</p>
                             <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 機器を水平に引っ張り、抜けた瞬間の最大値</p>
+                            <TestIntervalWarn warn={warnLip}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)}/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)} disabled={ro}/>
                               ))}
                             </div>
                             <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipLow?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
@@ -1991,9 +2599,10 @@ function PediatricFlow({patientId:initPid}) {
                             <label className="text-sm font-medium text-gray-700">🔬 舌圧検査（JMS舌圧計・3回測定）</label>
                             <p className="text-xs text-gray-400">{tongueNorm?`${tongueNorm.age}歳 平均${tongueNorm.mean}・cut-off ${tongueNorm.cutoff}kPa`:'JMS舌圧計'}{prevPed&&prevPed.maxTonguePressure?`／前回 ${prevPed.maxTonguePressure}kPa`:''}</p>
                             <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
+                            <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)}/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro}/>
                               ))}
                             </div>
                             <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueLow?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
@@ -2006,12 +2615,20 @@ function PediatricFlow({patientId:initPid}) {
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
                             <p className="text-xs text-gray-500 mb-2">📏 身長・体重（カウプ／ローレル指数を自動計算。初期値は年齢性別の平均）</p>
                             <div className="grid grid-cols-2 gap-3">
-                              <SelectNum label="身長" unit="cm" specKey="pedHeight" value={height} onChange={setHeight}/>
-                              <SelectNum label="体重" unit="kg" specKey="pedWeight" value={weight} onChange={setWeight}/>
+                              <SelectNum label="身長" unit="cm" specKey="pedHeight" value={height} onChange={setHeightRO} disabled={ro}/>
+                              <SelectNum label="体重" unit="kg" specKey="pedWeight" value={weight} onChange={setWeightRO} disabled={ro}/>
                             </div>
                             {bodyIndex && <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${bodyIndex.abnormal?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
                               {bodyIndex.name}: {bodyIndex.value}（{bodyIndex.label}）{bodyIndex.abnormal && ' → C項目（やせ／肥満）該当の可能性'}
                             </div>}
+                          </div>
+                        )}
+                        {/* 顔貌写真の添付：「その他」グループの最終項目直後（別紙2=C-18直下／別紙1=C-13直下） */}
+                        {grp.cat==='その他' && item.id===grp.items[grp.items.length-1].id && (
+                          <div className="px-5 pb-4 pt-1 bg-blue-50/30">
+                            <label className="text-sm font-medium text-gray-700">📷 顔貌写真（最大4枚）</label>
+                            <p className="text-xs text-gray-400 mb-2">例：安静時のお口ぽかん。画面表示のみで印刷物には載りません</p>
+                            <PhotoAttach photos={photos} onAdd={addPhoto} onRemove={removePhoto} ro={ro}/>
                           </div>
                         )}
                       </React.Fragment>
@@ -2041,7 +2658,7 @@ function PediatricFlow({patientId:initPid}) {
               <div className={`rounded-xl p-4 text-sm font-semibold ${scoring.qualifies?'bg-green-50 text-green-700 border border-green-200':'bg-red-50 text-red-700 border border-red-200'}`}>
                 {scoring.qualifies?'✓ 口腔機能発達不全症：診断基準を満たしています':'✗ 口腔機能発達不全症：診断基準を満たしていません'}
               </div>
-              <BillingBox qualifies={scoring.qualifies} sections={pedBillingSections(scoring.qualifies, scoring.dxCount, lipForce!=='', tonguePres!=='')}/>
+              <BillingBox qualifies={scoring.qualifies} sections={pedBillingSections(scoring.qualifies, scoring.dxCount, lipForce!=='', tonguePres!=='', {lip:warnLip, tongue:warnTongue})}/>
               <p className="text-xs text-gray-400">出典：日本歯科医学会「口腔機能発達不全症に関する基本的な考え方」令和6年3月</p>
             </div>
             {diagnosis.length>0 && (
@@ -2073,9 +2690,9 @@ function PediatricFlow({patientId:initPid}) {
             <div className="bg-white rounded-2xl shadow-sm p-6">
               <h2 className="font-semibold text-gray-800 mb-3">📝 メモ・管理方針</h2>
               <p className="text-xs text-gray-400 mb-2">判定結果を踏まえた管理方針を記入（管理計画書に印字されます）</p>
-              <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3} placeholder="検査中の様子・管理方針など"
-                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"/>
-              <NoteTemplates kind="pediatric" notes={notes} setNotes={setNotes}/>
+              <textarea value={notes} onChange={e=>setNotesRO(e.target.value)} disabled={ro} rows={3} placeholder="検査中の様子・管理方針など"
+                className={`w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none ${ro?'opacity-60 bg-gray-100':''}`}/>
+              {!ro && <NoteTemplates kind="pediatric" notes={notes} setNotes={setNotes}/>}
             </div>
             <NavBtns onBack={back} onNext={next} nextLabel="トレーニング処方へ →"/>
           </div>
@@ -2121,6 +2738,25 @@ function PediatricFlow({patientId:initPid}) {
           </div>
         )}
       </div>
+      {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
+      {showStaff && !isLoaded && !ro && (
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} onConfirm={confirmStaff}/>
+      )}
+      {/* 入力途中の戻る警告 */}
+      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}/>}
+      {/* 別紙1/2 切替の確認（チェック済みがある場合のみ） */}
+      {phaseSwitch && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={()=>setPhaseSwitch(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-bold text-gray-900 mb-2">チェックリストを切り替えますか？</h3>
+            <p className="text-sm text-gray-500 mb-6">別紙を切り替えると、チェック済みの{checkedC.length}項目はすべてリセットされます。</p>
+            <div className="flex gap-3">
+              <Btn onClick={()=>setPhaseSwitch(null)} variant="secondary" cls="flex-1">キャンセル</Btn>
+              <Btn onClick={()=>{ setPhaseOverride(phaseSwitch==='auto'?null:phaseSwitch); setCheckedC([]); setPhaseSwitch(null); }} variant="danger" cls="flex-1">切り替える</Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2128,19 +2764,14 @@ function PediatricFlow({patientId:initPid}) {
 // ═══════════════════════════════════════════════
 // MODULE-LEVEL: MeasInput (moved outside component to avoid remount bug)
 // ═══════════════════════════════════════════════
-function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey}) {
-  const opts = MEAS_OPTS[specKey||mkey] || [];
+function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled}) {
   const val = m[mkey]||''; const num = parseFloat(val);
   const abn = val!=='' && !isNaN(num) && (dir==='lt' ? num<thr : num>=thr);
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       <div className="flex items-center gap-1.5">
-        <select value={val} onChange={e=>setM(mkey,e.target.value)}
-          className={`w-full border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abn?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'}`}>
-          <option value="">—</option>
-          {opts.map(o=><option key={o} value={o}>{o}</option>)}
-        </select>
+        <StepperInput specKey={specKey||mkey} value={val} onChange={v=>setM(mkey,v)} abnormal={abn} disabled={disabled}/>
         {unit && <span className="text-xs text-gray-500 flex-shrink-0">{unit}</span>}
       </div>
       {abn && <p className="text-xs text-red-500 mt-0.5">基準値以下</p>}
@@ -2162,9 +2793,9 @@ function MoreBox({label, forceOpen, children, cls}) {
 }
 
 // TCI（舌苔指数）：舌を9分割し、各部位をタップで 0(なし)→1(薄い)→2(厚い) と循環。TCI = 合計/18×100%
-function TCITongue({zones, onChange}) {
+function TCITongue({zones, onChange, disabled}) {
   const z = zones || [0,0,0,0,0,0,0,0,0];
-  const tap = i => { const n=[...z]; n[i]=(n[i]+1)%3; onChange(n); };
+  const tap = i => { if(disabled) return; const n=[...z]; n[i]=(n[i]+1)%3; onChange(n); };
   const sum = z.reduce((a,b)=>a+b,0);
   const score = zones ? Math.round(sum/18*100) : null;
   const fill = v => v===0 ? '#fda4af' : v===1 ? '#fde8c8' : '#f3eada';
@@ -2200,7 +2831,7 @@ function TCITongue({zones, onChange}) {
         <p className={`text-2xl font-bold ${score!=null&&score>=50?'text-red-600':'text-gray-800'}`}>TCI {score!=null?score:'—'}<span className="text-sm font-normal">%</span></p>
         <p className="text-xs text-gray-400">50%以上で L-1 該当</p>
         {score!=null && score>=50 && <p className="text-xs text-red-500 font-medium">⚠ 基準値以上（≧50%）</p>}
-        {zones && <button onClick={()=>onChange(null)} className="text-xs text-gray-400 hover:text-red-500 underline">未検査に戻す</button>}
+        {zones && !disabled && <button onClick={()=>onChange(null)} className="text-xs text-gray-400 hover:text-red-500 underline">未検査に戻す</button>}
         <div className="text-[10px] text-gray-400 leading-relaxed pt-1">0=苔なし<br/>1=薄い舌苔<br/>2=厚い舌苔</div>
       </div>
     </div>
@@ -2228,7 +2859,7 @@ const EAT10_QUESTIONS = [
 const EMPTY_M = {tciScore:'50',tciZones:[1,1,1,1,1,1,1,1,1],bacteriaLevel:'',oralMoisture:MEAS_DEF.oralMoisture,saxonTest:'',biteForce:MEAS_DEF.biteForce,remainingTeeth:MEAS_DEF.remainingTeeth,biteFilter:true,ddk_pa:MEAS_DEF.ddk_pa,ddk_ta:MEAS_DEF.ddk_ta,ddk_ka:MEAS_DEF.ddk_ka,tonguePres3:[MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure],maxTonguePressure:MEAS_DEF.maxTonguePressure,masticationScore:'',eatScore:'',eatAnswers:Array(10).fill(null),rsst:''};
 
 // EAT-10 質問票：各質問を0〜4でタップ。合計を自動計算し3点以上で嚥下機能低下の疑い
-function EAT10({answers, onChange}) {
+function EAT10({answers, onChange, disabled}) {
   const ans = answers || Array(10).fill(null);
   const answered = ans.filter(v=>v!=null).length;
   const total = ans.reduce((s,v)=>s+(v||0),0);
@@ -2240,8 +2871,8 @@ function EAT10({answers, onChange}) {
           <span className="text-xs text-gray-700 flex-1"><span className="text-gray-400">Q{i+1}.</span> {qq}</span>
           <div className="flex gap-1 flex-shrink-0">
             {[0,1,2,3,4].map(v=>(
-              <button key={v} onClick={()=>onChange(i,v)}
-                className={`w-8 h-8 rounded-lg text-sm font-semibold ${ans[i]===v?'bg-blue-600 text-white':'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>{v}</button>
+              <button key={v} disabled={disabled} onClick={()=>{if(disabled)return;onChange(i,v);}}
+                className={`w-8 h-8 rounded-lg text-sm font-semibold ${ans[i]===v?'bg-blue-600 text-white':'bg-gray-100 text-gray-500 hover:bg-gray-200'} ${disabled?'opacity-60':''}`}>{v}</button>
             ))}
           </div>
         </div>
@@ -2254,16 +2885,40 @@ function EAT10({answers, onChange}) {
   );
 }
 
-function AdultFlow({patientId:initPid}) {
+function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const nav = useNav();
-  const {patients, assessments, addAssessment, updateAssessment} = useS();
-  const [step,setStep] = useState(initPid?'litems':'select');
-  const [pid,setPid] = useState(initPid||'');
+  const showToast = useToast();
+  const {patients, assessments, addAssessment, updateAssessment, clinic, getAssessment} = useS();
+  const ro = mode==='view'; // 閲覧モード（読み取り専用）
+  // 過去評価の読み込み：assessmentId があれば該当評価を取得して全stateを復元する
+  const loaded = assessmentId ? getAssessment(assessmentId) : null;
+  const isLoaded = !!loaded;
+  // 読込時の measurements を復元（EMPTY_M をベースに上書き）
+  const loadedM = loaded ? {...EMPTY_M, ...(loaded.measurements||{})} : null;
+  const [step,setStep] = useState((initPid||isLoaded)?'litems':'select');
+  const [pid,setPid] = useState(loaded?loaded.patientId:(initPid||''));
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
-  const [m,setM] = useState({...EMPTY_M});
-  const [manualL,setManualL] = useState([]);
-  const [notes,setNotes] = useState('');
-  const [savedId,setSavedId] = useState(null);
+  const [m,setM] = useState(loadedM||{...EMPTY_M});
+  // 手動L項目の復元：保存済み checkedLItems から自動判定分（measL）を除いた差分。算出不能時は全件をそのまま手動扱い
+  const [manualL,setManualL] = useState(()=>{
+    if(!loaded) return [];
+    const saved = loaded.checkedLItems||[];
+    try { const auto = computeMeasurementLItems(loadedM, adultTongueCutoff(null,null)); return saved.filter(x=>!auto.includes(x)); }
+    catch(e){ return saved; }
+  });
+  const [notes,setNotes] = useState(loaded?(loaded.notes||''):'');
+  const [savedId,setSavedId] = useState(assessmentId||null); // 読込時は savedId=評価ID → 保存は updateAssessment
+  // 担当者（評価時に選択）。読込時は評価データから復元
+  const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
+  const [staffHygienist, setStaffHygienist] = useState(loaded?(loaded.staffHygienist||''):'');
+  const [showStaff, setShowStaff] = useState(false); // 担当者選択モーダル
+  const [showBackWarn, setShowBackWarn] = useState(false); // 入力途中の戻る警告
+  const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
+  // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
+  const [tmpDoc, setTmpDoc] = useState('');
+  const [tmpHyg, setTmpHyg] = useState('');
+  useEffect(()=>{ if(showStaff){ setTmpDoc(docList[0]||''); setTmpHyg(hygList[0]||''); } }, [showStaff]);
+  const confirmStaff = () => { setStaffDoctor(tmpDoc); setStaffHygienist(tmpHyg); setShowStaff(false); };
 
   const patient = patients.find(p=>p.id===pid);
   const age = patient ? computeAge(patient.birth) : null;
@@ -2274,9 +2929,16 @@ function AdultFlow({patientId:initPid}) {
       .filter(x=>x.patientId===pid && x.type==='adult' && x.id!==savedId)
       .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
   },[assessments, pid, savedId]);
+
+  // 検査間隔3か月警告（舌圧・咬合圧・口腔粘膜湿潤度。前回検査値が入った直近評価日から3暦月未満なら算定不可）
+  const baseDate = isLoaded && loaded ? loaded.date : new Date();
+  const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).maxTonguePressure, savedId), baseDate), [assessments, pid, savedId]);
+  const warnBite = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).biteForce, savedId), baseDate), [assessments, pid, savedId]);
+  const warnMoist = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).oralMoisture, savedId), baseDate), [assessments, pid, savedId]);
   // 患者が決まったら、前回の検査値をプリセット（再評価の入力を高速化）。前回が無ければ既定値のまま
+  // ※過去評価の読み込み時（isLoaded）はプリセットしない（復元値を上書きしないため）
   useEffect(()=>{
-    if(!pid || !prevA || savedId) return;
+    if(!pid || !prevA || savedId || isLoaded) return;
     const pm = prevA.measurements||{};
     const merged = {...EMPTY_M, ...pm};
     // 旧データ（3回測定なし）から再評価する場合は、前回の平均値を3回分にプリセット
@@ -2294,46 +2956,58 @@ function AdultFlow({patientId:initPid}) {
     return {lItemCount:cnt,qualifies:q_,mainConditions:conds};
   },[allL]);
 
-  const toggleML = id => setManualL(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
-  const setMv = (k,v) => setM(p=>({...p,[k]:v}));
+  // 各セッターは閲覧モード（ro）ではガードして変更を無効化する
+  const toggleML = id => { if(ro) return; setManualL(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]); };
+  const setMv = (k,v) => { if(ro) return; setM(p=>({...p,[k]:v})); };
   // 最大舌圧：JMS舌圧計で3回測定し、入力済みの回の平均を測定値とする（りっぷるくんと同方式）
-  const setTongue3 = (i,v) => setM(p=>{
+  const setTongue3 = (i,v) => { if(ro) return; setM(p=>{
     const arr=[...(p.tonguePres3||['','',''])]; arr[i]=v;
     const nums=arr.map(parseFloat).filter(x=>!isNaN(x));
     const avg=nums.length?(Math.round(nums.reduce((a,b)=>a+b,0)/nums.length*10)/10).toFixed(1):'';
     return {...p, tonguePres3:arr, maxTonguePressure:avg};
-  });
+  }); };
   // 舌マップ（9分割）からTCI%を自動計算。null=未検査
-  const setTciZones = z => setM(p=>({...p, tciZones:z, tciScore: z ? String(Math.round(z.reduce((a,b)=>a+b,0)/18*100)) : ''}));
+  const setTciZones = z => { if(ro) return; setM(p=>({...p, tciZones:z, tciScore: z ? String(Math.round(z.reduce((a,b)=>a+b,0)/18*100)) : ''})); };
   // EAT-10：質問iの回答を更新し、合計をeatScoreに自動反映
-  const setEat = (i,v) => setM(p=>{
+  const setEat = (i,v) => { if(ro) return; setM(p=>{
     const arr=[...(p.eatAnswers||Array(10).fill(null))]; arr[i]=v;
     const any=arr.some(x=>x!=null); const total=arr.reduce((s,x)=>s+(x||0),0);
     return {...p, eatAnswers:arr, eatScore: any?String(total):''};
-  });
+  }); };
+  // メモも閲覧モードではガード
+  const setNotesRO = v => { if(ro) return; setNotes(v); };
 
   const doSave = () => {
-    const a={id:savedId||generateId(),patientId:pid,date:new Date().toISOString(),type:'adult',
-      checkedLItems:allL,measurements:m,diagnosis:diag,notes};
+    // 既存評価の更新時は元の日付を保持。新規作成時のみ現在日時をセット
+    const keepDate = (isLoaded && loaded) ? loaded.date : new Date().toISOString();
+    const a={id:savedId||generateId(),patientId:pid,date:keepDate,type:'adult',
+      checkedLItems:allL,measurements:m,diagnosis:diag,notes,staffDoctor,staffHygienist};
     savedId?updateAssessment(a):addAssessment(a);
     if(!savedId) setSavedId(a.id);
     return a.id;
+  };
+  // ヘッダ「トップに戻る」：入力途中（未保存・閲覧でない）なら警告、それ以外は即home
+  const onBackHome = () => {
+    if(step!=='select' && !savedId && !ro){ setShowBackWarn(true); }
+    else nav({p:'home'});
   };
   // NI is now module-level MeasInput — pass m and setMv via props
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <header className="bg-white shadow-sm px-6 py-4 flex items-center gap-4">
-        <button onClick={()=>nav({p:'home'})} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ トップに戻る</button>
+        <button onClick={onBackHome} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ トップに戻る</button>
         <div>
           <h1 className="text-lg font-bold text-gray-900">👴 口腔機能低下症</h1>
           {patient && age && <p className="text-xs text-gray-500">{patient.name}（{age.label} / {patient.gender==='male'?'男性':'女性'}）</p>}
         </div>
       </header>
-      {step!=='select' && <StepBar steps={ADU_STEPS} current={step}/>}
+      {/* 閲覧モードのバナー（常時表示） */}
+      {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更できません）</div>}
+      {step!=='select' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)}/>}
       <div className="flex-1 overflow-y-auto">
 
-        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('litems');}} selected={pid}/>}
+        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('litems');setShowStaff(docList.length>0||hygList.length>0);}} selected={pid} flowPage="adult"/>}
 
         {step==='litems' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
@@ -2352,53 +3026,56 @@ function AdultFlow({patientId:initPid}) {
                     const isChecked=allL.includes(item.id);
                     const row = (
                       <div className={`border-t border-gray-50 ${isChecked?'bg-blue-50':''}`}>
-                        <CheckRow id={item.id} label={item.label} isAuto={isAuto} checked={isChecked} onChange={()=>toggleML(item.id)}
+                        <CheckRow id={item.id} label={item.label} isAuto={isAuto} checked={isChecked} onChange={()=>toggleML(item.id)} disabled={ro}
                           detail={`${item.measurement} / 基準:${item.criterion}`}/>
                         <div className="px-5 pb-4">
                           {item.id==='L-1' && <div className="ml-7 space-y-2">
                             <p className="text-xs text-gray-500">舌の9分割をタップして舌苔の付着を記録（TCI自動計算）</p>
                             <div className="flex gap-4 items-start flex-wrap">
-                              <TCITongue zones={m.tciZones} onChange={setTciZones}/>
+                              <TCITongue zones={m.tciZones} onChange={setTciZones} disabled={ro}/>
                               <div className="flex-shrink-0">
                                 <p className="text-xs text-gray-400 mb-1">スコアの判別基準</p>
                                 <img src={TCI_GUIDE} alt="舌苔スコアの基準（0=なし／1=薄い／2=厚い）" className="rounded-lg border border-gray-200" style={{width:'300px',maxWidth:'100%'}}/>
                               </div>
                             </div>
                             <MoreBox label="細菌数レベルを入力（当院では通常検査しません）" forceOpen={m.bacteriaLevel!==''}>
-                              <div className="w-44"><MeasInput label="細菌数レベル" unit="Lv" mkey="bacteriaLevel" thr={4} dir="gte" m={m} setM={setMv}/></div>
+                              <div className="w-44"><MeasInput label="細菌数レベル" unit="Lv" mkey="bacteriaLevel" thr={4} dir="gte" m={m} setM={setMv} disabled={ro}/></div>
                             </MoreBox>
                           </div>}
                           {item.id==='L-2' && <div className="ml-7 space-y-2">
+                            <TestIntervalWarn warn={warnMoist}/>
                             <div className="grid grid-cols-2 gap-3">
-                              <MeasInput label="口腔湿潤度（ムーカス）" unit="" mkey="oralMoisture" thr={27} m={m} setM={setMv}/>
+                              <MeasInput label="口腔湿潤度（ムーカス）" unit="" mkey="oralMoisture" thr={27} m={m} setM={setMv} disabled={ro}/>
                               <div/>
                             </div>
                             <MoreBox label="サクソンテストを入力（当院では通常検査しません）" forceOpen={m.saxonTest!==''}>
-                              <div className="w-44"><MeasInput label="サクソンテスト" unit="g/2min" mkey="saxonTest" thr={2} m={m} setM={setMv}/></div>
+                              <div className="w-44"><MeasInput label="サクソンテスト" unit="g/2min" mkey="saxonTest" thr={2} m={m} setM={setMv} disabled={ro}/></div>
                             </MoreBox>
                           </div>}
                           {item.id==='L-3' && <div className="ml-7 space-y-2">
                             <div className="flex gap-4 text-sm">
                               {[[true,'フィルタあり（<350N）'],[false,'フィルタなし（<500N）']].map(([f,l])=>(
-                                <label key={String(f)} className="flex items-center gap-1.5 cursor-pointer">
-                                  <input type="radio" name="biteFilter" checked={m.biteFilter===f} onChange={()=>setMv('biteFilter',f)}/> {l}
+                                <label key={String(f)} className={`flex items-center gap-1.5 ${ro?'cursor-default':'cursor-pointer'}`}>
+                                  <input type="radio" name="biteFilter" checked={m.biteFilter===f} onChange={()=>setMv('biteFilter',f)} disabled={ro}/> {l}
                                 </label>
                               ))}
                             </div>
+                            <TestIntervalWarn warn={warnBite}/>
                             <div className="grid grid-cols-2 gap-3">
-                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv}/>
-                              <MeasInput label="残存歯数" unit="本" mkey="remainingTeeth" thr={20} m={m} setM={setMv}/>
+                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv} disabled={ro}/>
+                              <MeasInput label="残存歯数" unit="本" mkey="remainingTeeth" thr={20} m={m} setM={setMv} disabled={ro}/>
                             </div>
                           </div>}
                           {item.id==='L-4' && <div className="ml-7 grid grid-cols-3 gap-3">
-                            <MeasInput label="DDK-パ" unit="回/秒" mkey="ddk_pa" thr={6} m={m} setM={setMv}/><MeasInput label="DDK-タ" unit="回/秒" mkey="ddk_ta" thr={6} m={m} setM={setMv}/><MeasInput label="DDK-カ" unit="回/秒" mkey="ddk_ka" thr={6} m={m} setM={setMv}/>
+                            <MeasInput label="DDK-パ" unit="回/秒" mkey="ddk_pa" thr={6} m={m} setM={setMv} disabled={ro}/><MeasInput label="DDK-タ" unit="回/秒" mkey="ddk_ta" thr={6} m={m} setM={setMv} disabled={ro}/><MeasInput label="DDK-カ" unit="回/秒" mkey="ddk_ka" thr={6} m={m} setM={setMv} disabled={ro}/>
                           </div>}
                           {item.id==='L-5' && <div className="ml-7 space-y-2">
                             <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／目安≧{tongueCut}kPa）{prevA&&prevA.measurements&&prevA.measurements.maxTonguePressure?`／前回 ${prevA.measurements.maxTonguePressure}kPa`:''}</p>
                             <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
+                            <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)}/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro}/>
                               ))}
                             </div>
                             <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${m.maxTonguePressure===''?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
@@ -2406,11 +3083,11 @@ function AdultFlow({patientId:initPid}) {
                               {m.maxTonguePressure!=='' && parseFloat(m.maxTonguePressure)<tongueCut && <span className="ml-2 text-xs">⚠ 目安未満（＜{tongueCut}kPa）→ 低舌圧</span>}
                             </div>
                           </div>}
-                          {item.id==='L-6' && <div className="ml-7"><MeasInput label="グルコース濃度" unit="mg/dL" mkey="masticationScore" thr={100} m={m} setM={setMv}/></div>}
+                          {item.id==='L-6' && <div className="ml-7"><MeasInput label="グルコース濃度" unit="mg/dL" mkey="masticationScore" thr={100} m={m} setM={setMv} disabled={ro}/></div>}
                           {item.id==='L-7' && <div className="ml-7 space-y-3">
                             <p className="text-xs font-medium text-gray-600">EAT-10（嚥下スクリーニング質問票）</p>
-                            <EAT10 answers={m.eatAnswers} onChange={setEat}/>
-                            <div className="w-44"><MeasInput label="RSST（反復唾液嚥下）" unit="回/30秒" mkey="rsst" thr={3} m={m} setM={setMv}/></div>
+                            <EAT10 answers={m.eatAnswers} onChange={setEat} disabled={ro}/>
+                            <div className="w-44"><MeasInput label="RSST（反復唾液嚥下）" unit="回/30秒" mkey="rsst" thr={3} m={m} setM={setMv} disabled={ro}/></div>
                           </div>}
                         </div>
                       </div>
@@ -2437,7 +3114,7 @@ function AdultFlow({patientId:initPid}) {
               <p className="text-lg">{diag.qualifies?'⚠ 口腔機能低下症の疑いがあります':'✓ 口腔機能低下症の算定要件を満たしていません'}</p>
               <p className="text-sm font-normal mt-1">{diag.lItemCount}項目が該当（3項目以上で算定要件を満たします）</p>
             </div>
-            <BillingBox qualifies={diag.qualifies} sections={adultBillingSections(diag.qualifies, m.maxTonguePressure!=='', m.biteForce!=='', m.oralMoisture!=='', age?age.years:null)}/>
+            <BillingBox qualifies={diag.qualifies} sections={adultBillingSections(diag.qualifies, m.maxTonguePressure!=='', m.biteForce!=='', m.oralMoisture!=='', age?age.years:null, {tongue:warnTongue, bite:warnBite, moist:warnMoist})}/>
             <div className="bg-white rounded-2xl shadow-sm p-5">
               <h2 className="font-semibold text-gray-800 mb-1">📊 お口の機能バランス{prevA && <span className="text-xs font-normal text-gray-400 ml-2">前回（{formatDate(prevA.date)}）との比較</span>}</h2>
               <div className="flex justify-center">
@@ -2494,17 +3171,24 @@ function AdultFlow({patientId:initPid}) {
             <div className="bg-white rounded-2xl shadow-sm p-5">
               <h3 className="font-semibold text-gray-800 mb-2">📝 メモ・管理方針</h3>
               <p className="text-xs text-gray-400 mb-2">診断結果を踏まえた管理方針を記入（管理計画書に印字されます）</p>
-              <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3} placeholder="所見・管理方針など"
-                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"/>
-              <NoteTemplates kind="adult" notes={notes} setNotes={setNotes}/>
+              <textarea value={notes} onChange={e=>setNotesRO(e.target.value)} disabled={ro} rows={3} placeholder="所見・管理方針など"
+                className={`w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none ${ro?'opacity-60 bg-gray-100':''}`}/>
+              {!ro && <NoteTemplates kind="adult" notes={notes} setNotes={setNotes}/>}
             </div>
             <div className="flex gap-3">
               <Btn onClick={()=>setStep('litems')} variant="secondary"><span>◀</span> 戻る</Btn>
-              <Btn onClick={()=>{const id=doSave();nav({p:'print',assessmentId:id});}} cls="flex-1">🖨️ 印刷プレビューへ →</Btn>
+              {/* 閲覧モードは保存せず印刷プレビューへ */}
+              <Btn onClick={()=>{ if(ro){ nav({p:'print',assessmentId:savedId}); } else { const id=doSave(); showToast('保存しました'); nav({p:'print',assessmentId:id}); } }} cls="flex-1">🖨️ 印刷プレビューへ →</Btn>
             </div>
           </div>
         )}
       </div>
+      {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
+      {showStaff && !isLoaded && !ro && (
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} onConfirm={confirmStaff}/>
+      )}
+      {/* 入力途中の戻る警告 */}
+      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}/>}
     </div>
   );
 }
@@ -2512,18 +3196,43 @@ function AdultFlow({patientId:initPid}) {
 // ═══════════════════════════════════════════════
 // PAGE: PATIENT HISTORY
 // ═══════════════════════════════════════════════
-function History({patientId}) {
+function History({patientId, returnTo}) {
   const nav = useNav();
   const {getPatient, getPatientAssessments, deleteAssessment} = useS();
   const patient = getPatient(patientId);
   const assessments = getPatientAssessments(patientId);
+  const [openTarget, setOpenTarget] = useState(null); // 「開く」3択モーダルの対象評価
+  // 過去評価を閲覧/変更モードで開く
+  const openAssessment = (a, mode) => {
+    setOpenTarget(null);
+    nav({p:a.type==='pediatric'?'pediatric':'adult', patientId:a.patientId, assessmentId:a.id, mode});
+  };
   if(!patient) return <div className="flex items-center justify-center min-h-screen text-gray-500">患者が見つかりません</div>;
   const age = computeAge(patient.birth);
+  // 検査値の推移グラフ用データ：同患者の評価を昇順に並べ、各系列の有効値が2件以上ある時のみ系列化
+  const asc=[...assessments].sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const mk=(getter,cutFn)=>{ const pts=asc.map(a=>({date:a.date,value:parseFloat(getter(a))})).filter(p=>!isNaN(p.value));
+    return pts.length>=2 ? {points:pts, cutoffs:cutFn?pts.map(p=>cutFn(p.date)):null} : null; };
+  // 小児系列：舌圧（cut-off=年齢別）・口唇閉鎖力（cut-off=年齢性別の-1SD）
+  const trPedTongue = mk(a=>a.type==='pediatric'?a.maxTonguePressure:null, d=>{const n=pedTongueNorm(yearsAtDate(patient.birth,d)); return n?n.cutoff:null;});
+  const trPedLip    = mk(a=>a.type==='pediatric'?a.lipClosureForce:null, d=>{const n=lipForceNorm(yearsAtDate(patient.birth,d), patient.gender); return n?n.minus1sd:null;});
+  // 成人系列：舌圧（cut-off=年齢性別）
+  const trAduTongue = mk(a=>a.type==='adult'?(a.measurements||{}).maxTonguePressure:null, d=>adultTongueCutoff(yearsAtDate(patient.birth,d), patient.gender));
+  const hasTrend = trPedTongue||trPedLip||trAduTongue;
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header onBack={()=>nav({p:'patients'})} backLabel="患者一覧に戻る" title={`${patient.name} さんの評価履歴`} sub={`${age.label} / ${patient.gender==='male'?'男性':'女性'}`}/>
+      <Header onBack={()=>nav(returnTo ? {p:returnTo} : {p:'home'})} backLabel="戻る" title={`${patient.name} さんの評価履歴`} sub={`${age.label} / ${patient.gender==='male'?'男性':'女性'}`}/>
       <div className="max-w-3xl mx-auto px-6 py-6 space-y-4">
         <Btn onClick={()=>nav({p:age.years<18?'pediatric':'adult',patientId})}>➕ 新規評価を開始</Btn>
+        {patientId && hasTrend && (
+          <div className="bg-white rounded-2xl shadow-sm p-5">
+            <p className="text-base font-bold text-gray-900 mb-3">📈 検査値の推移</p>
+            <TrendCard title="最大舌圧（小児）" unit="kPa" series={trPedTongue} color="#2563eb"/>
+            <TrendCard title="口唇閉鎖力" unit="N" series={trPedLip} color="#16a34a"/>
+            <TrendCard title="最大舌圧（成人）" unit="kPa" series={trAduTongue} color="#2563eb"/>
+            <p className="text-[11px] text-gray-400 mt-1">青●＝実測値／オレンジ点線＝基準値(cut-off)。基準値は各評価日時点の年齢で算出。</p>
+          </div>
+        )}
         {assessments.length===0 && <div className="text-center py-12 text-gray-400 bg-white rounded-2xl shadow-sm">評価記録がありません</div>}
         {assessments.map(a=>{
           const isPed=a.type==='pediatric';
@@ -2548,6 +3257,7 @@ function History({patientId}) {
                   )}
                 </div>
                 <div className="flex gap-2">
+                  <button onClick={()=>setOpenTarget(a)} className="p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="開く">📂</button>
                   <button onClick={()=>nav({p:'print',assessmentId:a.id})} className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg" title="印刷">🖨️</button>
                   <button onClick={()=>deleteAssessment(a.id)} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="削除">🗑️</button>
                 </div>
@@ -2556,6 +3266,119 @@ function History({patientId}) {
           );
         })}
       </div>
+      {/* 過去評価を開く：3択モーダル（閲覧 / 変更 / キャンセル） */}
+      {openTarget && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={()=>setOpenTarget(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-bold text-gray-900 mb-2">※過去の検査データです</h3>
+            <p className="text-sm text-gray-500 mb-6">誤って変更しないようご注意ください。どのように開きますか？</p>
+            <div className="flex flex-col gap-2.5">
+              <Btn onClick={()=>openAssessment(openTarget,'view')} cls="w-full">👁 閲覧する（見るだけ）</Btn>
+              <Btn onClick={()=>openAssessment(openTarget,'edit')} variant="secondary" cls="w-full">✏️ 変更する</Btn>
+              <Btn onClick={()=>setOpenTarget(null)} variant="gray" cls="w-full">変更しない（キャンセル）</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 算定メモ（院内用）の印刷内容。評価の入力状況から pedBillingSections/adultBillingSections を再利用して組み立てる
+function BillingMemo({a, patient, age, isPed}){
+  const {assessments}=useS();
+  // 検査間隔3か月警告：この評価日(a.date)を基準・この評価(a.id)を除外して、過去の同検査値から判定
+  let qualifies, sections;
+  if (isPed) {
+    qualifies = !!a.scoring?.qualifies;
+    const warns = {
+      lip:    testIntervalWarn(lastTestedDate(assessments, a.patientId, 'pediatric', x=>x.lipClosureForce, a.id), a.date),
+      tongue: testIntervalWarn(lastTestedDate(assessments, a.patientId, 'pediatric', x=>x.maxTonguePressure, a.id), a.date),
+    };
+    sections = pedBillingSections(
+      qualifies,
+      a.scoring?.dxCount,
+      a.lipClosureForce!=='' && a.lipClosureForce!=null,
+      a.maxTonguePressure!=='' && a.maxTonguePressure!=null,
+      warns
+    );
+  } else {
+    const m = a.measurements||{};
+    qualifies = !!a.diagnosis?.qualifies;
+    const warns = {
+      tongue: testIntervalWarn(lastTestedDate(assessments, a.patientId, 'adult', x=>(x.measurements||{}).maxTonguePressure, a.id), a.date),
+      bite:   testIntervalWarn(lastTestedDate(assessments, a.patientId, 'adult', x=>(x.measurements||{}).biteForce, a.id), a.date),
+      moist:  testIntervalWarn(lastTestedDate(assessments, a.patientId, 'adult', x=>(x.measurements||{}).oralMoisture, a.id), a.date),
+    };
+    sections = adultBillingSections(
+      qualifies,
+      m.maxTonguePressure!=='' && m.maxTonguePressure!=null,
+      m.biteForce!=='' && m.biteForce!=null,
+      m.oralMoisture!=='' && m.oralMoisture!=null,
+      age.years,
+      warns
+    );
+  }
+  // 小計（BillingBoxと同じ規則：ラベルに「検査」を含むセクションは検査分）
+  const sum = rows => rows.reduce((s,r)=>s+r.point*(r.times||1),0);
+  const isTestSec = s => s.label.indexOf('検査')!==-1;
+  const monthly = sections.filter(s=>!isTestSec(s)).reduce((s,sec)=>s+sum(sec.rows),0);
+  const tests   = sections.filter(isTestSec).reduce((s,sec)=>s+sum(sec.rows),0);
+  const th = {border:'1px solid #9ca3af',padding:'4px 8px',background:'#f3f4f6',fontSize:'11px',fontWeight:'700',color:'#374151',textAlign:'left'};
+  const td = {border:'1px solid #9ca3af',padding:'4px 8px',fontSize:'11px',color:'#111'};
+  return (
+    <div>
+      {/* 専用ヘッダ（院内メモであることを明示） */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:'10px',paddingBottom:'6px',borderBottom:'2px solid #374151'}}>
+        <div>
+          <h1 style={{fontSize:'17px',fontWeight:'700',color:'#111'}}>算定メモ（院内用）</h1>
+          <p style={{fontSize:'11px',color:'#666'}}>{isPed?'口腔機能発達不全症':'口腔機能低下症'}　令和8年6月改定</p>
+        </div>
+        <div style={{textAlign:'right',fontSize:'11px',color:'#374151'}}>
+          <p>患者：<span style={{fontWeight:'700',color:'#111'}}>{patient.name}</span>（{age.label}）</p>
+          <p>評価日：<span style={{fontWeight:'700',color:'#111'}}>{formatDate(a.date)}</span></p>
+        </div>
+      </div>
+      {!qualifies && (
+        <p style={{fontSize:'11px',color:'#b45309',marginBottom:'8px'}}>診断未成立 — 管理料は算定不可。検査は「疑い」病名で算定。</p>
+      )}
+      {sections.length===0
+        ? <div style={{border:'1px solid #9ca3af',padding:'10px',fontSize:'12px',color:'#6b7280',textAlign:'center'}}>算定対象がありません</div>
+        : (
+          <table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead>
+              <tr>
+                <th style={{...th,width:'40%'}}>名称</th>
+                <th style={th}>備考</th>
+                <th style={{...th,textAlign:'right',whiteSpace:'nowrap'}}>点数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sections.map((sec,si)=>(
+                <React.Fragment key={si}>
+                  <tr><td colSpan={3} style={{...td,background:'#eef2ff',fontWeight:'700',color:'#3730a3'}}>{sec.label}</td></tr>
+                  {sec.rows.map((r,i)=>(
+                    <tr key={i}>
+                      <td style={td}>{r.name}</td>
+                      <td style={{...td,fontSize:'10px',color:'#4b5563'}}>{r.detail||''}</td>
+                      <td style={{...td,textAlign:'right',fontWeight:'700',whiteSpace:'nowrap'}}>{r.point}点{r.times?`×${r.times}`:''}</td>
+                    </tr>
+                  ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+      {sections.length>0 && (
+        <table style={{width:'100%',borderCollapse:'collapse',marginTop:'8px'}}>
+          <tbody>
+            {monthly>0 && <tr><td style={{...td,fontWeight:'600'}}>毎月分 小計（歯リハ3を月2回算定時）</td><td style={{...td,textAlign:'right',fontWeight:'700',whiteSpace:'nowrap',width:'90px'}}>{monthly}点</td></tr>}
+            {tests>0 && <tr><td style={{...td,fontWeight:'600'}}>検査分 小計</td><td style={{...td,textAlign:'right',fontWeight:'700',whiteSpace:'nowrap'}}>{tests}点</td></tr>}
+            {monthly>0 && tests>0 && <tr><td style={{...td,fontWeight:'700',background:'#f3f4f6'}}>検査月 合計</td><td style={{...td,textAlign:'right',fontWeight:'700',background:'#f3f4f6',whiteSpace:'nowrap'}}>{monthly+tests}点</td></tr>}
+          </tbody>
+        </table>
+      )}
+      <p style={{fontSize:'10px',color:'#9ca3af',marginTop:'10px'}}>※院内用メモです。患者には渡さないでください。算定可否はレセプトで最終確認してください。</p>
     </div>
   );
 }
@@ -2581,6 +3404,7 @@ function PrintPreview({assessmentId}) {
   const bw = toWareki(by);
   const birthWareki = `${bw.era}${bw.ey===1?'元':bw.ey}年${bm}月${bdd}日`;
   const isPlan = docType==='plan';
+  const isBilling = docType==='billing'; // 算定メモ（院内用）タブ
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -2589,8 +3413,9 @@ function PrintPreview({assessmentId}) {
           className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ {isPed?'トレーニング処方に戻る':'L項目・検査に戻る'}</button>
         <h1 className="text-lg font-bold text-gray-900 flex-1">印刷プレビュー</h1>
         <div className="flex rounded-xl overflow-hidden border border-gray-200">
-          <button onClick={()=>setDocType('patient')} className={`px-4 py-2 text-sm font-medium ${!isPlan?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>👨‍👩‍👧 患者配布用</button>
-          <button onClick={()=>setDocType('plan')} className={`px-4 py-2 text-sm font-medium ${isPlan?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>📋 管理計画書</button>
+          <button onClick={()=>setDocType('patient')} className={`px-4 py-2 text-sm font-medium ${docType==='patient'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>👨‍👩‍👧 患者配布用</button>
+          <button onClick={()=>setDocType('plan')} className={`px-4 py-2 text-sm font-medium ${docType==='plan'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>📋 管理計画書</button>
+          <button onClick={()=>setDocType('billing')} className={`px-4 py-2 text-sm font-medium ${docType==='billing'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>💰 算定メモ</button>
         </div>
         <button onClick={()=>window.print()} className="flex items-center gap-2 bg-blue-600 text-white px-5 py-2.5 rounded-xl font-medium hover:bg-blue-700">🖨️ 印刷する</button>
         <button onClick={()=>nav({p:'home'})} className="flex items-center gap-2 bg-gray-100 text-gray-700 px-4 py-2.5 rounded-xl text-sm hover:bg-gray-200">🏠 最初に戻る</button>
@@ -2611,29 +3436,36 @@ function PrintPreview({assessmentId}) {
             {clinic.logo && <img src={clinic.logo} alt="Logo" style={{height:'40px',objectFit:'contain'}}/>}
           </div>
         )}
-        <div style={{textAlign:'center',marginBottom:'12px'}}>
-          <h1 style={{fontSize:'18px',fontWeight:'700',color:isPlan?'#111':'#1e40af',marginBottom:'2px'}}>
-            {isPlan ? `${isPed?'口腔機能発達不全症':'口腔機能低下症'} 管理計画書` : 'お口の機能チェック結果のお知らせ'}
-          </h1>
-          <p style={{fontSize:'11px',color:'#666'}}>{isPlan ? '院内保管・カルテ添付用' : (isPed?'口腔機能発達不全症の評価とご家庭でのトレーニング':'口腔機能低下症の評価と今後の管理方針')}</p>
-          <div style={{height:'2px',background:isPlan?'#374151':'#1d4ed8',margin:'6px 48px 0'}}/>
-        </div>
-        <div style={{display:'flex',gap:'18px',marginBottom:'12px',background:'#f8fafc',borderRadius:'10px',padding:'8px 14px',flexWrap:'wrap'}}>
-          {(isPlan
-            ? [['カルテNo', patient.chartNo||'—'],['氏名',patient.name],['生年月日',birthWareki],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日（指導日）',formatDate(a.date)]]
-            : [['お名前',`${patient.name} さん`],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日',formatDate(a.date)]]
-          ).map(([l,v])=>(
-            <div key={l}><p style={{fontSize:'10px',color:'#888'}}>{l}</p><p style={{fontWeight:'600',color:'#111',fontSize:'13px'}}>{v}</p></div>
-          ))}
-        </div>
+        {/* 算定メモタブは専用ヘッダ＋テーブルを描画するため、患者配布用/計画書の共通ヘッダは出さない */}
+        {!isBilling && (
+          <div style={{textAlign:'center',marginBottom:'12px'}}>
+            <h1 style={{fontSize:'18px',fontWeight:'700',color:isPlan?'#111':'#1e40af',marginBottom:'2px'}}>
+              {isPlan ? `${isPed?'口腔機能発達不全症':'口腔機能低下症'} 管理計画書` : 'お口の機能チェック結果のお知らせ'}
+            </h1>
+            <p style={{fontSize:'11px',color:'#666'}}>{isPlan ? '院内保管・カルテ添付用' : (isPed?'口腔機能発達不全症の評価とご家庭でのトレーニング':'口腔機能低下症の評価と今後の管理方針')}</p>
+            <div style={{height:'2px',background:isPlan?'#374151':'#1d4ed8',margin:'6px 48px 0'}}/>
+          </div>
+        )}
+        {!isBilling && (
+          <div style={{display:'flex',gap:'18px',marginBottom:'12px',background:'#f8fafc',borderRadius:'10px',padding:'8px 14px',flexWrap:'wrap'}}>
+            {(isPlan
+              ? [['カルテNo', patient.chartNo||'—'],['氏名',patient.name],['生年月日',birthWareki],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日（指導日）',formatDate(a.date)]]
+              : [['お名前',`${patient.name} さん`],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日',formatDate(a.date)]]
+            ).map(([l,v])=>(
+              <div key={l}><p style={{fontSize:'10px',color:'#888'}}>{l}</p><p style={{fontWeight:'600',color:'#111',fontSize:'13px'}}>{v}</p></div>
+            ))}
+          </div>
+        )}
 
-        {isPlan
-          ? (isPed
-              ? <PlanPediatric a={a} patient={patient} ageYears={age.years} prev={prevA} clinic={clinic}/>
-              : <PlanAdult a={a} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA} clinic={clinic}/>)
-          : (isPed
-              ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name} prev={prevA}/>
-              : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA}/>)}
+        {isBilling
+          ? <BillingMemo a={a} patient={patient} age={age} isPed={isPed}/>
+          : isPlan
+            ? (isPed
+                ? <PlanPediatric a={a} patient={patient} ageYears={age.years} prev={prevA} clinic={clinic}/>
+                : <PlanAdult a={a} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA} clinic={clinic}/>)
+            : (isPed
+                ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name} prev={prevA}/>
+                : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA}/>)}
 
         <div style={{marginTop:'14px',paddingTop:'8px',borderTop:'1px solid #e5e7eb',fontSize:'10px',color:'#aaa',display:'flex',justifyContent:'space-between'}}>
           <span>口腔機能管理アプリ v1.0.0</span>
@@ -2802,15 +3634,15 @@ const NOTE_TEMPLATES = {
     {label:'👀 経過観察',   text:'明らかな機能低下は認めず。経過観察とし、約3か月後に再評価を行う。'},
   ],
 };
-// メモ欄の下に置く定型文チップ（タップで追記）
+// メモ欄の下に置く定型文リスト（本文全文をそのまま選択肢として表示。タップで追記）
 function NoteTemplates({kind, notes, setNotes}){
   return (
-    <div className="flex flex-wrap gap-2 mt-2">
-      <span className="text-xs text-gray-400 self-center">定型文：</span>
+    <div className="flex flex-col gap-1.5 mt-2">
+      <span className="text-xs text-gray-400">定型文（タップで追記）：</span>
       {NOTE_TEMPLATES[kind].map(t=>(
         <button key={t.label} onClick={()=>setNotes(notes ? notes+'\n'+t.text : t.text)}
-          className="text-xs px-3 py-1.5 rounded-full bg-gray-100 text-gray-600 hover:bg-blue-50 hover:text-blue-700 border border-gray-200"
-          title={t.text}>＋{t.label}</button>
+          className="w-full text-left text-xs px-3 py-2 rounded-lg bg-gray-50 text-gray-600 hover:bg-blue-50 hover:text-blue-700 border border-gray-200 leading-relaxed">
+          {t.label.split(' ')[0]} {t.text}</button>
       ))}
     </div>
   );
@@ -2844,11 +3676,12 @@ function PlanFooter({a, clinic, trainingsLabel}){
             </tr>
             <tr>
               <td style={{border:'1px solid #9ca3af',padding:'3px 8px',background:'#f3f4f6'}}>歯科医師名</td>
-              <td style={{border:'1px solid #9ca3af',padding:'3px 8px'}}>{clinic?.doctor||''}　　　㊞</td>
+              {/* 押印欄は2020年12月の押印見直しで原則廃止のため不要。担当医師は評価時の選択を優先 */}
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px'}}>{a.staffDoctor||clinic?.doctor||''}</td>
             </tr>
             <tr>
               <td style={{border:'1px solid #9ca3af',padding:'3px 8px',background:'#f3f4f6'}}>歯科衛生士名</td>
-              <td style={{border:'1px solid #9ca3af',padding:'3px 8px'}}></td>
+              <td style={{border:'1px solid #9ca3af',padding:'3px 8px'}}>{a.staffHygienist||''}</td>
             </tr>
           </tbody>
         </table>
@@ -3022,19 +3855,30 @@ function App() {
   const store = useStore();
   const [page, setPage] = useState({p:'home'});
 
+  // 保存完了トースト（ページ遷移を跨いで表示）。連続呼び出しはタイマーをリセット
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
+  const showToast = useCallback((text)=>{
+    setToast(text);
+    if(toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(()=>setToast(null), 1500);
+  }, []);
+
   // ページ遷移したら必ず先頭から表示
   useEffect(()=>{ window.scrollTo(0,0); }, [page]);
+
+  // 起動時に一度だけ：参照されていない孤児写真をIndexedDBから掃除（取りこぼし回収）
+  useEffect(()=>{ sweepOrphanPhotos(); }, []);
 
   const renderPage = () => {
     switch(page.p) {
       case 'home': return <Home/>;
       case 'settings': return <Settings/>;
-      case 'patients': return <Patients/>;
-      case 'patientForm': return <PatientForm patientId={page.patientId}/>;
-      case 'pediatric': return <PediatricFlow patientId={page.patientId}/>;
-      case 'adult': return <AdultFlow patientId={page.patientId}/>;
+      case 'patientForm': return <PatientForm patientId={page.patientId} returnTo={page.returnTo}/>;
+      case 'pediatric': return <PediatricFlow patientId={page.patientId} assessmentId={page.assessmentId} mode={page.mode}/>;
+      case 'adult': return <AdultFlow patientId={page.patientId} assessmentId={page.assessmentId} mode={page.mode}/>;
       case 'print': return <PrintPreview assessmentId={page.assessmentId}/>;
-      case 'history': return <History patientId={page.patientId}/>;
+      case 'history': return <History patientId={page.patientId} returnTo={page.returnTo}/>;
       default: return <Home/>;
     }
   };
@@ -3042,9 +3886,12 @@ function App() {
   return (
     <StoreCtx.Provider value={store}>
       <NavCtx.Provider value={setPage}>
-        <div className="min-h-screen bg-gray-50">
-          {renderPage()}
-        </div>
+        <ToastCtx.Provider value={showToast}>
+          <div className="min-h-screen bg-gray-50">
+            {renderPage()}
+            {toast && <div className="no-print fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] bg-green-600 text-white px-6 py-3 rounded-2xl shadow-lg text-sm font-semibold pointer-events-none">✅ {toast}</div>}
+          </div>
+        </ToastCtx.Provider>
       </NavCtx.Provider>
     </StoreCtx.Provider>
   );
