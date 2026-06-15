@@ -424,7 +424,8 @@ input[type=checkbox], input[type=radio] {
 }
 /* スクロールを滑らかに（慣性スクロール） */
 body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
-@page { size: B5; margin: 8mm 10mm; }
+/* 用紙サイズは印刷プレビューのA4/B5切替で@pageを上書き（下のmarginは既定） */
+@page { margin: 8mm 10mm; }
 @media print {
   .no-print { display:none !important; }
   body { background:white; }
@@ -439,7 +440,7 @@ body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
 <body class="bg-gray-50">
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useMemo, useCallback, useRef, createContext, useContext } = React;
+const { useState, useEffect, useMemo, useCallback, useRef, useReducer, createContext, useContext } = React;
 
 // ═══════════════════════════════════════════════
 // UTILITIES
@@ -671,6 +672,44 @@ function load(key, fallback) {
 function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 
 // ═══════════════════════════════════════════════
+// バージョン管理（アップグレードでデータを失わないための土台）
+//   データ(localStorage/IndexedDB)はオリジン（URL）単位で保持される。同じURLで配信し続ける限り、
+//   アプリを新版に差し替えてもデータは消えない。ここはその上で「形の変更」と「更新の通知」を安全に扱う土台。
+//   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
+//   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
+// ═══════════════════════════════════════════════
+const APP_VERSION = '1.1.0';        // ★配布のたびに更新（フッター表示＆更新案内のトリガー）
+const DATA_SCHEMA_VERSION = 1;      // 保存データの“形”の版
+const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
+// migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
+//   将来 v1→v2 で評価に項目追加する例:
+//   (load,save)=>{ const a=load('assessments',[]); save('assessments', a.map(x=>({...x, 新項目: x.新項目 ?? null}))); }
+//   ※splitName/EMPTY_M等の「項目の有無で旧データを吸収する」既存処理はそのまま残す。ここは構造変更専用。
+const migrations = [
+  // (v0→v1) 既存データは定義上すでにv1のため意図的に無し
+];
+// 起動時に一度だけ実行（Reactのrender前）。冪等。失敗時は印を付けず次回起動で再試行。
+function runMigrations(){
+  let from = load('dataSchemaVersion', LEGACY_SCHEMA_VERSION);
+  if(typeof from !== 'number' || from < 0) from = LEGACY_SCHEMA_VERSION; // 壊れたマーカー対策
+  if(from >= DATA_SCHEMA_VERSION){ save('dataSchemaVersion', DATA_SCHEMA_VERSION); return; }
+  for(let v=from; v<DATA_SCHEMA_VERSION; v++){
+    const step = migrations[v]; // 版v → v+1
+    if(typeof step==='function'){
+      try { step(load, save); }
+      catch(e){ console.error('migration '+v+'→'+(v+1)+' failed', e); return; } // 印を付けず中断
+    }
+  }
+  save('dataSchemaVersion', DATA_SCHEMA_VERSION);
+}
+// 新規端末（データ無し）には更新案内を出さないよう、初回起動時に現行版で印を付ける。
+// 既存データがある端末（印なし）は“一度だけ”更新案内を出したいので、ここでは印を付けない。
+function initVersionMarker(){
+  const hasData = load('patients',[]).length>0 || load('assessments',[]).length>0;
+  if(load('lastSeenAppVersion',null)===null && !hasData) save('lastSeenAppVersion', APP_VERSION);
+}
+
+// ═══════════════════════════════════════════════
 // 検査間隔（3か月ルール）判定ヘルパー
 //   保険の検査料（舌圧・小児口唇閉鎖力・咬合圧1・口腔粘膜湿潤度）は「3月に1回」＝
 //   暦月ベースで前回検査から3暦月未満は算定不可。前回検査値が入力済みの直近評価日を基準に判定。
@@ -818,7 +857,19 @@ function dataURLBytes(dataURL){
 // ═══════════════════════════════════════════════
 const BACKUP_ITER = 30000; // PBKDF2の反復回数（純JSのため過大にすると遅い。十分な強度かつ実用速度）
 const BACKUP_KEYS = ['patients','assessments','clinic'];
-// 全データ（写真同梱）を集めて暗号化し、ファイル用オブジェクト(JSON)を返す。schema:2。
+// payloadをパスワードでAES-CBC暗号化し、ファイル用エンベロープ(JSON)を返す（full/差分で共用）
+function encryptPayload(payload, password){
+  const salt = CryptoJS.lib.WordArray.random(16);
+  const iv   = CryptoJS.lib.WordArray.random(16);
+  const key  = CryptoJS.PBKDF2(password, salt, { keySize:256/32, iterations:BACKUP_ITER, hasher:CryptoJS.algo.SHA256 });
+  const enc  = CryptoJS.AES.encrypt(JSON.stringify(payload), key, { iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7 });
+  return {
+    app:'oralFunctionApp', enc:'AES-CBC', kdf:'PBKDF2-SHA256', iter:BACKUP_ITER,
+    salt: salt.toString(CryptoJS.enc.Hex), iv: iv.toString(CryptoJS.enc.Hex),
+    ct: enc.toString(), createdAt:new Date().toISOString()
+  };
+}
+// 全データ（写真同梱）を集めて暗号化したファイルオブジェクトを返す。schema:2・mode:'full'。
 //   写真はIndexedDBから読むためasync。data.photos={id:dataURL}。
 async function makeEncryptedBackup(password) {
   // IndexedDBの全写真を {id:dataURL} に集約（参照集合に限らず存在する全件を同梱）
@@ -829,19 +880,11 @@ async function makeEncryptedBackup(password) {
     for(const id of ids){ const d = await getPhoto(id); if(d!=null){ photoMap[id] = d; photoCount++; } }
   } catch(e){ /* 写真が読めなくても本体は書き出す */ }
   const payload = {
-    app:'oralFunctionApp', schema:2, exportedAt:new Date().toISOString(),
+    app:'oralFunctionApp', schema:2, mode:'full', exportedAt:new Date().toISOString(),
     data:{ patients:load('patients',[]), assessments:load('assessments',[]), clinic:load('clinic',{}), photos:photoMap }
   };
-  const salt = CryptoJS.lib.WordArray.random(16);
-  const iv   = CryptoJS.lib.WordArray.random(16);
-  const key  = CryptoJS.PBKDF2(password, salt, { keySize:256/32, iterations:BACKUP_ITER, hasher:CryptoJS.algo.SHA256 });
-  const enc  = CryptoJS.AES.encrypt(JSON.stringify(payload), key, { iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7 });
-  return {
-    app:'oralFunctionApp', enc:'AES-CBC', kdf:'PBKDF2-SHA256', iter:BACKUP_ITER,
-    salt: salt.toString(CryptoJS.enc.Hex), iv: iv.toString(CryptoJS.enc.Hex),
-    ct: enc.toString(), createdAt:new Date().toISOString(),
-    counts:{ patients:(load('patients',[])||[]).length, assessments:(load('assessments',[])||[]).length, photos:photoCount }
-  };
+  return { ...encryptPayload(payload, password), mode:'full',
+    counts:{ patients:(load('patients',[])||[]).length, assessments:(load('assessments',[])||[]).length, photos:photoCount } };
 }
 // ファイルオブジェクトとパスワードから復号。失敗時は例外
 function readEncryptedBackup(fileObj, password) {
@@ -856,6 +899,81 @@ function readEncryptedBackup(fileObj, password) {
   const payload = JSON.parse(text);
   if(!payload || !payload.data || !Array.isArray(payload.data.patients)) throw new Error('データ形式が不正です');
   return payload;
+}
+
+// ── 日次運用：週1フル＋毎日差分のハイブリッド ─────────────────────────
+//   localStorageキー: lastBackupAt（最終）/ lastFullBackupAt（最終フル）/
+//   backedUpPhotoIds（書き出し済み写真id）/ pendingTombstones（前回以降の削除id）
+const FULL_EVERY_DAYS = 7; // この日数を超えたら差分でなくフルを作る
+function backupNeedsFull(){
+  const lf = load('lastFullBackupAt', null);
+  if(!lf) return true; // フル未作成（または旧運用）はまずフル
+  return (Date.now() - new Date(lf).getTime()) >= FULL_EVERY_DAYS*86400000;
+}
+// 前回バックアップ以降に未保存の変更があるか（updatedAt・削除tombstoneで同期判定）
+function hasUnbackedChanges(){
+  const since = load('lastBackupAt', null);
+  if(!since) return (load('assessments',[]).length>0 || load('patients',[]).length>0);
+  const t = new Date(since).getTime();
+  const changed = x => x.updatedAt && new Date(x.updatedAt).getTime() > t;
+  if(load('patients',[]).some(changed) || load('assessments',[]).some(changed)) return true;
+  if((load('pendingTombstones',[])||[]).length) return true;
+  return false;
+}
+// 差分ファイルを構築（前回バックアップ以降の変更分＋未書き出し写真＋削除tombstone）。schema:3・mode:'diff'
+async function buildDiffBackup(password){
+  const since = load('lastBackupAt', null);
+  const t = since ? new Date(since).getTime() : 0;
+  const changed = x => x.updatedAt && new Date(x.updatedAt).getTime() > t;
+  const patients = load('patients',[]).filter(changed);
+  const assessments = load('assessments',[]).filter(changed);
+  const tombstones = load('pendingTombstones',[]) || [];
+  const done = new Set(load('backedUpPhotoIds',[]) || []);
+  const photoMap = {}; let photoCount=0; const newPhotoIds=[];
+  try {
+    const ids = await listPhotoIds();
+    for(const id of ids){ if(done.has(id)) continue; const d=await getPhoto(id); if(d!=null){ photoMap[id]=d; photoCount++; newPhotoIds.push(id); } }
+  } catch(e){ /* 写真が読めなくても本体は書き出す */ }
+  const payload = { app:'oralFunctionApp', schema:3, mode:'diff', exportedAt:new Date().toISOString(),
+    data:{ patients, assessments, clinic:load('clinic',{}), photos:photoMap, tombstones } };
+  return { fileObj:{ ...encryptPayload(payload, password), mode:'diff',
+      counts:{ patients:patients.length, assessments:assessments.length, photos:photoCount, tombstones:tombstones.length } },
+    newPhotoIds };
+}
+// ファイルオブジェクトをダウンロード（YYYY-MM-DD_HHMM＋full/差分を名前に）
+function downloadBackupFile(fileObj, type){
+  const json = JSON.stringify(fileObj,null,2);
+  const blob = new Blob([json], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const d=new Date(), p=n=>String(n).padStart(2,'0');
+  const stamp=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+  const a=document.createElement('a'); a.href=url; a.download=`口腔機能管理_${type==='full'?'full':'差分'}_${stamp}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  return Math.round(json.length/1024/1024*10)/10; // 概算MB
+}
+// バックアップ実施後の簿記（タイムスタンプ・写真済みid・tombstoneクリア）を更新
+async function recordBackupDone(type){
+  const now = new Date().toISOString();
+  save('lastBackupAt', now);
+  save('pendingTombstones', []);
+  if(type==='full'){
+    save('lastFullBackupAt', now);
+    try { save('backedUpPhotoIds', await listPhotoIds()); } catch(e){ save('backedUpPhotoIds', []); }
+  }
+}
+// 1タップ実行：週1でフル、それ以外は差分。ダウンロード＋簿記まで。{type,counts,mb}を返す
+async function runHybridBackup(password, forceFull){
+  const full = forceFull || backupNeedsFull();
+  let fileObj, type, newPhotoIds=null;
+  if(full){ fileObj = await makeEncryptedBackup(password); type='full'; }
+  else { const r = await buildDiffBackup(password); fileObj = r.fileObj; newPhotoIds = r.newPhotoIds; type='diff'; }
+  const mb = downloadBackupFile(fileObj, type);
+  if(type==='diff'){
+    const done = (load('backedUpPhotoIds',[])||[]).concat(newPhotoIds||[]);
+    save('backedUpPhotoIds', Array.from(new Set(done)));
+  }
+  await recordBackupDone(type);
+  return { type, counts:fileObj.counts, mb };
 }
 
 // ═══════════════════════════════════════════════
@@ -1304,6 +1422,17 @@ function computePediatricScoring(checked, items) {
 }
 
 // 診断パターン抽出：チェック済みC項目が持つpatternsを集計。最多該当を主診（primary）、他を副診（secondary）
+// 検査値を年齢平均・-1SD（cut-off）から3段階で評価（保護者説明用）。
+//   low=要訓練の境界(-1SD/cut-off), mean=年齢平均。基準が無い／未入力はnullを返す
+//   戻り値 {key:'low'|'mid'|'good', label, color}
+function gradeBySD(value, low, mean, lowLabel){
+  if(value===''||value==null) return null;
+  const v = parseFloat(value); if(isNaN(v)) return null;
+  if(low==null && mean==null) return null; // 基準値が無く判定不能
+  if(low!=null && v<=low) return {key:'low', label:lowLabel, color:'#dc2626'};
+  if(mean!=null && v>=mean) return {key:'good', label:'良好', color:'#16a34a'};
+  return {key:'mid', label:'やや弱め', color:'#d97706'}; // -1SDは超えるが平均より低め
+}
 //   checkedItems=チェック済みのC項目オブジェクト配列, lipLow/tongueLow=機能検査での基準値以下フラグ
 function computePediatricDiagnosis(checkedItems, lipLow, tongueLow) {
   const hits = {};
@@ -1384,23 +1513,29 @@ function useStore() {
   const [assessments, setAssessments] = useState(() => load('assessments',[]));
   const [clinic, setClinicState] = useState(() => load('clinic',{name:'',logo:'',doctor:'',address:'',phone:'',doctors:[],hygienists:[]}));
 
-  const addPatient = p => { const n=[...patients,p]; setPatients(n); save('patients',n); };
-  const updatePatient = p => { const n=patients.map(x=>x.id===p.id?p:x); setPatients(n); save('patients',n); };
+  // 差分バックアップ用：保存時にupdatedAtを刻む／削除はtombstoneに記録
+  const stamp = o => ({...o, updatedAt:new Date().toISOString()});
+  const addTombstone = (t,id) => { const ts=load('pendingTombstones',[])||[]; ts.push({t,id,at:new Date().toISOString()}); save('pendingTombstones',ts); };
+  const addPatient = p => { const x=stamp(p); const n=[...patients,x]; setPatients(n); save('patients',n); };
+  const updatePatient = p => { const x=stamp(p); const n=patients.map(o=>o.id===x.id?x:o); setPatients(n); save('patients',n); };
   const deletePatient = id => {
     // 当該患者の全評価が参照する写真をIndexedDBから削除（fire-and-forget）
     const photoIds = assessments.filter(x=>x.patientId===id).flatMap(x=>(x.photos||[]).map(p=>p.id));
     if(photoIds.length) deletePhotos(photoIds).catch(()=>{});
     const n=patients.filter(x=>x.id!==id); setPatients(n); save('patients',n);
+    const removed=assessments.filter(x=>x.patientId===id);
     const a=assessments.filter(x=>x.patientId!==id); setAssessments(a); save('assessments',a);
+    addTombstone('patient',id); removed.forEach(r=>addTombstone('assessment',r.id));
   };
-  const addAssessment = a => { const n=[...assessments,a]; setAssessments(n); save('assessments',n); };
-  const updateAssessment = a => { const n=assessments.map(x=>x.id===a.id?a:x); setAssessments(n); save('assessments',n); };
+  const addAssessment = a => { const x=stamp(a); const n=[...assessments,x]; setAssessments(n); save('assessments',n); };
+  const updateAssessment = a => { const x=stamp(a); const n=assessments.map(o=>o.id===x.id?x:o); setAssessments(n); save('assessments',n); };
   const deleteAssessment = id => {
     // 対象評価が参照する写真をIndexedDBから削除（fire-and-forget）
     const tgt = assessments.find(x=>x.id===id);
     const photoIds = tgt ? (tgt.photos||[]).map(p=>p.id) : [];
     if(photoIds.length) deletePhotos(photoIds).catch(()=>{});
     const n=assessments.filter(x=>x.id!==id); setAssessments(n); save('assessments',n);
+    addTombstone('assessment',id);
   };
   const setClinic = c => { setClinicState(c); save('clinic',c); };
   const nextNo = () => {
@@ -1484,28 +1619,8 @@ function NumInput({label,hint,unit,value,onChange,abnormal,abnormalText}) {
 }
 // リスト式の数値入力（iPadではホイール選択になり素早く選べる）
 // テンキー直接入力＋±ステッパー。blur/Enterで MEAS_SPEC にスナップ（snapToSpec 利用）
-function StepperInput({specKey, value, onChange, abnormal, disabled}){
-  const s = MEAS_SPEC[specKey]||{min:0,max:999,step:1,avg:0};
-  const [text, setText] = useState(value==null?'':String(value));
-  useEffect(()=>{ setText(value==null?'':String(value)); }, [value]); // ±押下・プリセット反映
-  const commit = () => { if(text===''){ onChange(''); return; }
-    const n=parseFloat(text); onChange(isNaN(n)?'':snapToSpec(specKey,n)); };
-  const stepBy = dir => { if(disabled) return;
-    const cur=parseFloat(value); const base=isNaN(cur)?s.avg:cur;
-    onChange(snapToSpec(specKey, base+dir*s.step)); };
-  const btnCls = "w-10 h-10 flex-shrink-0 rounded-lg bg-gray-100 text-gray-600 text-xl font-bold active:bg-blue-100 disabled:opacity-40";
-  return (
-    <div className="flex items-center gap-1">
-      <button type="button" onClick={()=>stepBy(-1)} disabled={disabled} className={btnCls}>−</button>
-      <input type="text" inputMode="decimal" value={text} disabled={disabled}
-        onChange={e=>setText(e.target.value.replace(/[^0-9.]/g,''))}
-        onBlur={commit} onKeyDown={e=>{if(e.key==='Enter')e.target.blur();}} placeholder="—"
-        className={`w-16 text-center border rounded-xl px-1 py-2 ${abnormal?'border-red-300 bg-red-50':'border-gray-200'} ${disabled?'opacity-60 bg-gray-100':''} focus:outline-none focus:ring-2 ${abnormal?'focus:ring-red-400':'focus:ring-blue-400'}`}/>
-      <button type="button" onClick={()=>stepBy(+1)} disabled={disabled} className={btnCls}>＋</button>
-    </div>
-  );
-}
 function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText,disabled}) {
+  const opts = MEAS_OPTS[specKey] || [];
   return (
     <div>
       <div className="flex justify-between mb-1">
@@ -1513,7 +1628,11 @@ function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText
         {hint && <span className="text-xs text-gray-400">{hint}</span>}
       </div>
       <div className="flex items-center gap-2">
-        <StepperInput specKey={specKey} value={value} onChange={onChange} abnormal={abnormal&&value!==''} disabled={disabled}/>
+        <select value={value||''} onChange={e=>onChange(e.target.value)} disabled={disabled}
+          className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}>
+          <option value="">—</option>
+          {opts.map(o=><option key={o} value={o}>{o}</option>)}
+        </select>
         {unit && <span className="text-sm text-gray-500">{unit}</span>}
         {abnormal && value!=='' && <span className="text-xs text-red-600">⚠ {abnormalText||'基準値以下'}</span>}
       </div>
@@ -1725,10 +1844,31 @@ function ElderIcon({size=112}) {
 function Home() {
   const nav = useNav();
   const {assessments} = useS();
-  // バックアップ経過警告：14日以上=黄 / 30日以上=赤。評価が1件も無ければ表示しない
+  const showToast = useToast();
+  const [bkBusy, setBkBusy] = useState(false);
+  const [, bump] = useReducer(x=>x+1, 0); // バックアップ後に再描画して案内を消す
+  // バックアップ案内：未保存の変更がある時だけ表示。30日↑赤 / 14日↑濃い黄 / 1日↑（または未実施）通常案内
   const bk = load('lastBackupAt',null);
+  const autoPw = load('autoBackupPw','');
   const days = bk ? Math.floor((Date.now()-new Date(bk).getTime())/86400000) : Infinity;
-  const level = assessments.length===0 ? null : days>=30 ? 'red' : days>=14 ? 'yellow' : null;
+  const dueChanges = hasUnbackedChanges();
+  const level = !dueChanges ? null : days>=30 ? 'red' : days>=14 ? 'amber' : (bk===null || days>=1) ? 'info' : null;
+  const palette = {red:'bg-red-50 border-red-200 text-red-800', amber:'bg-amber-50 border-amber-200 text-amber-800', info:'bg-blue-50 border-blue-200 text-blue-800'};
+  const btnPalette = {red:'bg-red-600 hover:bg-red-700', amber:'bg-amber-600 hover:bg-amber-700', info:'bg-blue-600 hover:bg-blue-700'};
+  // アプリ更新の検知：前回見た版と違い、かつ実データがあれば「更新直後の案内」を最優先で表示（更新後のバックアップ漏れ防止）
+  const seenVer = load('lastSeenAppVersion', null);
+  const hasData = load('patients',[]).length>0 || load('assessments',[]).length>0;
+  const showUpdate = seenVer !== APP_VERSION && hasData;
+  const dailyLevel = showUpdate ? null : level; // 更新案内中は通常の日次案内を出さない（二重表示防止）
+  const stampSeen = () => { save('lastSeenAppVersion', APP_VERSION); bump(); }; // 「後で」で今回版を既読化
+  const oneTapBackup = async () => {
+    if(bkBusy) return;
+    if(!autoPw){ nav({p:'settings'}); return; } // 未設定なら設定画面へ（既読化しない）
+    setBkBusy(true);
+    try { const r = await runHybridBackup(autoPw); showToast(`バックアップしました（${r.type==='full'?'フル':'差分'}）`); if(showUpdate) save('lastSeenAppVersion', APP_VERSION); }
+    catch(e){ window.alert('バックアップに失敗しました：'+(e&&e.message?e.message:'不明なエラー')); }
+    setBkBusy(false); bump();
+  };
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50 to-gray-50 flex flex-col">
       <header className="bg-white shadow-sm px-6 py-4 flex items-center justify-between">
@@ -1741,15 +1881,27 @@ function Home() {
         </div>
         <button onClick={()=>nav({p:'settings'})} className="p-2 rounded-full hover:bg-gray-100 text-gray-500 text-xl" title="設定">⚙️</button>
       </header>
-      {level && (
-        <div className={`px-6 py-3 flex items-center gap-3 border-b ${level==='red'?'bg-red-50 border-red-200':'bg-amber-50 border-amber-200'}`}>
-          <span className={`text-sm flex-1 ${level==='red'?'text-red-800':'text-amber-800'}`}>
-            ⚠ {bk
-              ? `最終バックアップから${days}日経過しています。データ消失に備えて書き出してください。`
-              : 'バックアップが一度も行われていません。データ消失に備えて書き出してください。'}
+      {showUpdate ? (
+        <div className={`px-6 py-3 flex items-center gap-3 border-b ${palette.info}`}>
+          <span className="text-sm flex-1">🆕 アプリが新しくなりました（v{APP_VERSION}）。念のためバックアップをおすすめします。</span>
+          <button onClick={oneTapBackup} disabled={bkBusy}
+            className={`flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white disabled:opacity-50 ${btnPalette.info}`}>
+            {bkBusy?'⏳ 実行中…':(autoPw?'今すぐバックアップ':'設定へ →')}
+          </button>
+          <button onClick={stampSeen} disabled={bkBusy}
+            className="flex-shrink-0 text-sm px-3 py-1.5 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-100 disabled:opacity-50">後で</button>
+        </div>
+      ) : dailyLevel && (
+        <div className={`px-6 py-3 flex items-center gap-3 border-b ${palette[dailyLevel]}`}>
+          <span className="text-sm flex-1">
+            {dailyLevel==='info'?'💾 ':'⚠ '}{bk
+              ? `最終バックアップから${days>=1?days+'日':'まもなく1日'}。今日のバックアップをおすすめします。`
+              : 'まだバックアップがありません。データ消失に備えて書き出してください。'}
           </span>
-          <button onClick={()=>nav({p:'settings'})}
-            className={`flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white ${level==='red'?'bg-red-600 hover:bg-red-700':'bg-amber-600 hover:bg-amber-700'}`}>設定へ →</button>
+          <button onClick={oneTapBackup} disabled={bkBusy}
+            className={`flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white disabled:opacity-50 ${btnPalette[dailyLevel]}`}>
+            {bkBusy?'⏳ 実行中…':(autoPw?'今すぐバックアップ':'設定へ →')}
+          </button>
         </div>
       )}
       <div className="px-6 pt-6 grid grid-cols-1 md:grid-cols-2 gap-5 flex-1">
@@ -1772,7 +1924,7 @@ function Home() {
           <span className="bg-green-100 text-green-700 text-xs font-medium px-3 py-1 rounded-full">利用可能</span>
         </button>
       </div>
-      <footer className="text-center py-6 text-xs text-gray-400">Version 1.0.0</footer>
+      <footer className="text-center py-6 text-xs text-gray-400">Version {APP_VERSION}</footer>
     </div>
   );
 }
@@ -1809,6 +1961,10 @@ function Settings() {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState(null);
   const [lastBackupAt, setLastBackupAt] = useState(()=>load('lastBackupAt',null)); // 最終バックアップ日時
+  const [lastFullAt, setLastFullAt] = useState(()=>load('lastFullBackupAt',null)); // 最終フルバックアップ日時
+  // 1タップ/日次バックアップ用に保存するパスワード（端末内のみ。詳細はUIの注記参照）
+  const [autoPw, setAutoPw] = useState(()=>load('autoBackupPw',''));
+  const [autoPwInput, setAutoPwInput] = useState('');
   // ストレージ使用状況（localStorage実測＋写真メタ集計＋IndexedDB件数＋端末割当）
   const [storageInfo, setStorageInfo] = useState(null);
   useEffect(()=>{ (async()=>{
@@ -1840,8 +1996,8 @@ function Settings() {
         setExpPw(''); setExpPw2('');
         const warn = mb>=50 ? `\n⚠ ファイルが大きめ（約${mb}MB）です。保存先の空き容量にご注意ください。` : '';
         setMsg({type:'ok',text:`書き出しました（患者${fileObj.counts.patients}名・評価${fileObj.counts.assessments}件・写真${fileObj.counts.photos||0}枚／約${mb}MB）。パスワードは大切に保管してください。${warn}`});
-        // バックアップ実施を記録（Home/Settingsの経過警告に利用）
-        const nowIso=new Date().toISOString(); save('lastBackupAt',nowIso); setLastBackupAt(nowIso);
+        // フルバックアップとして簿記（最終フル日時・写真済みid・tombstoneクリア）
+        await recordBackupDone('full'); setLastBackupAt(load('lastBackupAt',null));
       } catch(e){ setMsg({type:'err',text:'書き出しに失敗しました：'+e.message}); }
       setBusy('');
     }, 60);
@@ -1863,24 +2019,49 @@ function Settings() {
     setTimeout(async ()=>{
       try {
         const payload = readEncryptedBackup(impFile, impPw);
+        const isDiff = payload.mode==='diff';
         const photoMap = payload.data.photos || {};               // schema:1には無い（写真なし＝後方互換）
         const np=(payload.data.patients||[]).length, na=(payload.data.assessments||[]).length, nphoto=Object.keys(photoMap).length;
+        const ntomb=(payload.data.tombstones||[]).length;
         setBusy('');
         const when = payload.exportedAt ? new Date(payload.exportedAt).toLocaleString('ja-JP') : '不明';
-        if(!window.confirm(`復元すると、この端末の現在のデータ（患者・評価・医院設定・顔貌写真）は全て置き換わります。\n\nこのバックアップの内容：患者${np}名・評価${na}件・写真${nphoto}枚\n作成日時：${when}\n\n全置き換えしてよろしいですか？`)) return;
+        const msg = isDiff
+          ? `差分バックアップを取り込みます（既存データは消えません・同じ患者/評価は新しい内容に更新）。\n\n内容：追加更新 患者${np}名・評価${na}件・写真${nphoto}枚${ntomb?`・削除${ntomb}件`:''}\n作成日時：${when}\n\n取り込んでよろしいですか？`
+          : `復元すると、この端末の現在のデータ（患者・評価・医院設定・顔貌写真）は全て置き換わります。\n\nこのバックアップの内容：患者${np}名・評価${na}件・写真${nphoto}枚\n作成日時：${when}\n\n全置き換えしてよろしいですか？`;
+        if(!window.confirm(msg)) return;
         setBusy(`復元しています…（写真${nphoto}枚を書き戻し中）`);
-        save('patients', payload.data.patients||[]);
-        save('assessments', payload.data.assessments||[]);
-        save('clinic', payload.data.clinic||{});
-        // 写真ストアを全クリア→バックアップの写真を書き戻し（全置き換えセマンティクス）。完了まで必ずawait。
-        try {
-          await clearAllPhotos();
-          for(const id of Object.keys(photoMap)){ await putPhoto(id, photoMap[id]); }
-        } catch(pe){ window.alert('写真の復元に一部失敗しました：'+(pe&&pe.message?pe.message:'不明なエラー')); }
+        if(isDiff){
+          // 差分マージ：id単位でupsert→tombstoneのidを削除→写真は追記（既存を消さない）
+          const upsert = (cur, incoming) => { const map=new Map(cur.map(x=>[x.id,x])); incoming.forEach(x=>map.set(x.id,x)); return Array.from(map.values()); };
+          let pts = upsert(load('patients',[]), payload.data.patients||[]);
+          let asm = upsert(load('assessments',[]), payload.data.assessments||[]);
+          const delP=new Set(), delA=new Set();
+          (payload.data.tombstones||[]).forEach(t=>{ (t.t==='patient'?delP:delA).add(t.id); });
+          pts = pts.filter(x=>!delP.has(x.id)); asm = asm.filter(x=>!delA.has(x.id) && !delP.has(x.patientId));
+          save('patients', pts); save('assessments', asm);
+          if(payload.data.clinic && Object.keys(payload.data.clinic).length) save('clinic', payload.data.clinic);
+          try { for(const id of Object.keys(photoMap)){ await putPhoto(id, photoMap[id]); } }
+          catch(pe){ window.alert('写真の取り込みに一部失敗しました：'+(pe&&pe.message?pe.message:'不明なエラー')); }
+          // 取り込んだ写真は「書き出し済み」に加える（この端末の差分チェーン用）
+          const done=(load('backedUpPhotoIds',[])||[]).concat(Object.keys(photoMap));
+          save('backedUpPhotoIds', Array.from(new Set(done)));
+        } else {
+          save('patients', payload.data.patients||[]);
+          save('assessments', payload.data.assessments||[]);
+          save('clinic', payload.data.clinic||{});
+          // 写真ストアを全クリア→バックアップの写真を書き戻し（全置き換えセマンティクス）。完了まで必ずawait。
+          try {
+            await clearAllPhotos();
+            for(const id of Object.keys(photoMap)){ await putPhoto(id, photoMap[id]); }
+          } catch(pe){ window.alert('写真の復元に一部失敗しました：'+(pe&&pe.message?pe.message:'不明なエラー')); }
+          save('lastFullBackupAt', payload.exportedAt||new Date().toISOString());
+          save('backedUpPhotoIds', Object.keys(photoMap));
+        }
+        save('pendingTombstones', []);
+        // 復元/取り込んだ状態はそのバックアップ時点で保存済み＝直後に警告を出さない
+        save('lastBackupAt', payload.exportedAt||new Date().toISOString());
         setBusy('');
-        // 復元直後にバックアップ警告が出る混乱を防ぐため、復元時刻をlastBackupAtに記録
-        save('lastBackupAt', new Date().toISOString());
-        window.alert('復元しました。画面を再読み込みします。');
+        window.alert((isDiff?'取り込みました':'復元しました')+'。画面を再読み込みします。');
         location.reload();
       } catch(e){ setBusy(''); setMsg({type:'err',text:'復元に失敗しました：'+e.message+'（パスワードやファイルをご確認ください）'}); }
     }, 60);
@@ -1894,10 +2075,6 @@ function Settings() {
           <div>
             <label className={labelCls}>クリニック名</label>
             <input type="text" value={form.name||''} onChange={e=>upd('name',e.target.value)} placeholder="例）○○歯科医院" className={inputCls}/>
-          </div>
-          <div>
-            <label className={labelCls}>担当医師名</label>
-            <input type="text" value={form.doctor||''} onChange={e=>upd('doctor',e.target.value)} placeholder="例）田中 歯科医師" className={inputCls}/>
           </div>
           <div>
             <label className={labelCls}>住所</label>
@@ -1971,10 +2148,29 @@ function Settings() {
           <div>
             <h2 className="font-semibold text-gray-800">🔒 データのバックアップ</h2>
             <p className="text-xs text-gray-500 mt-1">患者・評価記録・医院設定をパスワード付きファイルに書き出し／復元します。端末の買い替えやデータ移動、万一の消失に備えてください。データは各端末のブラウザ内にのみ保存されます。</p>
-            <p className="text-xs mt-1.5 font-medium text-gray-600">最終バックアップ：<span className={lastBackupAt?'text-gray-700':'text-red-600'}>{lastBackupAt?formatDate(lastBackupAt):'未実施'}</span></p>
+            <p className="text-xs mt-1.5 font-medium text-gray-600">最終バックアップ：<span className={lastBackupAt?'text-gray-700':'text-red-600'}>{lastBackupAt?formatDate(lastBackupAt):'未実施'}</span>{lastFullAt?<span className="text-gray-400">（最終フル {formatDate(lastFullAt)}）</span>:''}</p>
           </div>
           {msg && <div className={`rounded-xl px-4 py-3 text-sm ${msg.type==='ok'?'bg-green-50 text-green-700':'bg-red-50 text-red-700'}`}>{msg.text}</div>}
           {busy && <div className="rounded-xl px-4 py-3 text-sm bg-blue-50 text-blue-700">⏳ {busy}</div>}
+
+          {/* 1タップ・日次バックアップ（週1フル＋毎日差分）。パスワードを保存するとトップ画面から1タップで実行できる */}
+          <div className="border border-blue-100 bg-blue-50/40 rounded-xl p-4 space-y-3">
+            <p className="text-sm font-medium text-gray-700">⚡ 1タップ・日次バックアップ</p>
+            <p className="text-xs text-gray-500">パスワードを保存すると、トップ画面に出る案内から<strong>1タップ</strong>でバックアップできます。週1回は全体（フル）、ふだんは前回からの変更だけの<strong>差分</strong>（軽量・高速）を書き出します。写真も差分側に含まれます。</p>
+            {autoPw ? (
+              <div className="flex items-center gap-2">
+                <span className="flex-1 text-sm text-green-700">✓ パスワード保存済み（1タップ有効）</span>
+                <button onClick={()=>{ save('autoBackupPw',''); setAutoPw(''); }} className="px-3 py-1.5 rounded-lg text-sm bg-white border border-gray-200 text-gray-600">解除</button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <input type="password" value={autoPwInput} onChange={e=>setAutoPwInput(e.target.value)} placeholder="保存するパスワード（4文字以上）" className={inputCls}/>
+                <button onClick={()=>{ if(autoPwInput.length<4){setMsg({type:'err',text:'パスワードは4文字以上で設定してください'});return;} save('autoBackupPw',autoPwInput); setAutoPw(autoPwInput); setAutoPwInput(''); setMsg({type:'ok',text:'1タップバックアップを有効にしました'}); }}
+                  className="flex-shrink-0 px-4 py-3 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">保存</button>
+              </div>
+            )}
+            <p className="text-[11px] text-gray-400">※パスワードはこの端末内にのみ保存されます（端末内にはもともと元データがあるため、端末上の安全性は変わりません）。暗号化はバックアップ<strong>ファイル</strong>を第三者から守るためのものです。保存先はiCloud Drive等の同期フォルダにすると端末故障にも備えられます。</p>
+          </div>
 
           <div className="border border-gray-100 rounded-xl p-4 space-y-3">
             <p className="text-sm font-medium text-gray-700">📤 書き出し（バックアップ作成）</p>
@@ -2096,7 +2292,12 @@ function PatientForm({patientId, returnTo}) {
     const w = toWareki(y);
     return {era:w.era, ey:w.ey, m, d};
   };
-  const [bd, setBd] = useState(parseBirth(existing?.birth||''));
+  // 新規登録時の元号の初期値：発達不全症(小児)は令和、機能低下症(成人)は昭和を既定に
+  const [bd, setBd] = useState(()=>{
+    const p = parseBirth(existing?.birth||'');
+    if(!existing && !p.era) p.era = returnTo==='adult' ? '昭和' : returnTo==='pediatric' ? '令和' : '';
+    return p;
+  });
   const eraObj = e => ERAS.find(x=>x.name===e);
   const westYear = b => { const eo=eraObj(b.era); return (eo && b.ey) ? eo.start + b.ey - 1 : ''; };
   const setBirthPart = (part, raw) => {
@@ -2395,6 +2596,9 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const setNotesRO = v => { if(ro) return; setNotes(v); };
   const lipLow = lipForce!=='' && lipNorm && parseFloat(lipForce) <= lipNorm.minus1sd;       // -1SD以下で不足
   const tongueLow = tonguePres!=='' && tongueNorm && parseFloat(tonguePres) <= tongueNorm.cutoff; // cut-off値以下で低舌圧
+  // 3段階評価（良好／やや弱め／不足）。診断ロジックには影響せず、表示の補助のみ
+  const lipGrade = gradeBySD(lipForce, lipNorm?lipNorm.minus1sd:null, lipNorm?lipNorm.mean:null, '口唇閉鎖力不足');
+  const tongueGrade = gradeBySD(tonguePres, tongueNorm?tongueNorm.cutoff:null, tongueNorm?tongueNorm.mean:null, '低舌圧');
   const scoring = useMemo(()=>computePediatricScoring(checkedC, cItems),[checkedC, cItems]);
   const diagnosis = useMemo(()=>computePediatricDiagnosis(checkedItemObjs, lipLow, tongueLow),[checkedC, cItems, lipLow, tongueLow]);
 
@@ -2588,9 +2792,11 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                                 <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)} disabled={ro}/>
                               ))}
                             </div>
-                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipLow?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipGrade&&lipGrade.key==='low'?'bg-red-50 text-red-700':lipGrade&&lipGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
                               平均（測定値）：<span className="font-bold text-base">{lipForce!==''?lipForce:'—'}</span> N{lip3nums.length>0&&lip3nums.length<3?`（${lip3nums.length}回入力）`:''}
-                              {lipLow && <span className="ml-2 text-xs">⚠ -1SD以下（≦{lipNorm.minus1sd}N）→ 口唇閉鎖力不足</span>}
+                              {lipGrade&&lipGrade.key==='low' && <span className="ml-2 text-xs">⚠ -1SD以下（≦{lipNorm.minus1sd}N）→ 口唇閉鎖力不足</span>}
+                              {lipGrade&&lipGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{lipNorm.mean}Nより低め・-1SDは超えています）</span>}
+                              {lipGrade&&lipGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{lipNorm.mean}N以上）</span>}
                             </div>
                           </div>
                         )}
@@ -2605,9 +2811,11 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                                 <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro}/>
                               ))}
                             </div>
-                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueLow?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueGrade&&tongueGrade.key==='low'?'bg-red-50 text-red-700':tongueGrade&&tongueGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
                               平均（測定値）：<span className="font-bold text-base">{tonguePres!==''?tonguePres:'—'}</span> kPa{tongue3nums.length>0&&tongue3nums.length<3?`（${tongue3nums.length}回入力）`:''}
-                              {tongueLow && <span className="ml-2 text-xs">⚠ cut-off値以下（≦{tongueNorm.cutoff}kPa）→ 低舌圧</span>}
+                              {tongueGrade&&tongueGrade.key==='low' && <span className="ml-2 text-xs">⚠ cut-off値以下（≦{tongueNorm.cutoff}kPa）→ 低舌圧</span>}
+                              {tongueGrade&&tongueGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{tongueNorm.mean}kPaより低め・cut-offは超えています）</span>}
+                              {tongueGrade&&tongueGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{tongueNorm.mean}kPa以上）</span>}
                             </div>
                           </div>
                         )}
@@ -2765,13 +2973,18 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
 // MODULE-LEVEL: MeasInput (moved outside component to avoid remount bug)
 // ═══════════════════════════════════════════════
 function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled}) {
+  const opts = MEAS_OPTS[specKey||mkey] || [];
   const val = m[mkey]||''; const num = parseFloat(val);
   const abn = val!=='' && !isNaN(num) && (dir==='lt' ? num<thr : num>=thr);
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       <div className="flex items-center gap-1.5">
-        <StepperInput specKey={specKey||mkey} value={val} onChange={v=>setM(mkey,v)} abnormal={abn} disabled={disabled}/>
+        <select value={val} onChange={e=>setM(mkey,e.target.value)} disabled={disabled}
+          className={`w-full border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abn?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}>
+          <option value="">—</option>
+          {opts.map(o=><option key={o} value={o}>{o}</option>)}
+        </select>
         {unit && <span className="text-xs text-gray-500 flex-shrink-0">{unit}</span>}
       </div>
       {abn && <p className="text-xs text-red-500 mt-0.5">基準値以下</p>}
@@ -2798,7 +3011,8 @@ function TCITongue({zones, onChange, disabled}) {
   const tap = i => { if(disabled) return; const n=[...z]; n[i]=(n[i]+1)%3; onChange(n); };
   const sum = z.reduce((a,b)=>a+b,0);
   const score = zones ? Math.round(sum/18*100) : null;
-  const fill = v => v===0 ? '#fda4af' : v===1 ? '#fde8c8' : '#f3eada';
+  // 0=苔なし（健康なピンク）/ 1=薄い舌苔（淡い黄）/ 2=厚い舌苔（濃いゴールド）。1と2の差を明確化
+  const fill = v => v===0 ? '#fda4af' : v===1 ? '#fde68a' : '#d97706';
   const colX=[10,67,124], rowY=[8,75,142], CW=53, RH=63;
   const cells=[]; // 行：奥→先、列：右→左（術者から見た図）
   for(let r=0;r<3;r++) for(let c=0;c<3;c++){ const i=r*3+c; cells.push({i,x:colX[c],y:rowY[r]}); }
@@ -2816,7 +3030,7 @@ function TCITongue({zones, onChange, disabled}) {
             {cells.map(({i,x,y})=>(
               <g key={i} onClick={()=>tap(i)} style={{cursor:'pointer'}}>
                 <rect x={x} y={y} width={CW} height={RH} fill={fill(z[i])} stroke="#9c6f77" strokeWidth="1"/>
-                <text x={x+CW/2} y={y+RH/2+5} textAnchor="middle" fontSize="15" fontWeight="700" paintOrder="stroke" stroke="#ffffff" strokeWidth="2.5" fill={z[i]===0?'#d96b78':'#92400e'}>{z[i]}</text>
+                <text x={x+CW/2} y={y+RH/2+5} textAnchor="middle" fontSize="15" fontWeight="700" paintOrder="stroke" stroke="#ffffff" strokeWidth="2.5" fill={z[i]===0?'#d96b78':z[i]===1?'#92400e':'#7c2d12'}>{z[i]}</text>
               </g>
             ))}
           </g>
@@ -3390,6 +3604,9 @@ function PrintPreview({assessmentId}) {
   const nav = useNav();
   const {getAssessment, getPatient, clinic, assessments} = useS();
   const [docType, setDocType] = useState('patient'); // 'patient'=患者配布用 / 'plan'=管理計画書（院内用）
+  const [paper, setPaper] = useState('B5');           // 用紙サイズ A4/B5（既定B5）
+  // 用紙ごとの印刷可能幅（用紙幅 − 左右余白10mm×2）。Safari等@page非対応環境でも実寸を担保
+  const PAPER = {A4:{w:190, prev:680}, B5:{w:156, prev:560}};
   const a = getAssessment(assessmentId);
   const patient = a ? getPatient(a.patientId) : null;
   if(!a||!patient) return <div className="flex items-center justify-center min-h-screen text-gray-500">評価データが見つかりません</div>;
@@ -3410,18 +3627,25 @@ function PrintPreview({assessmentId}) {
     <div className="min-h-screen bg-gray-100">
       <div className="bg-white shadow-sm px-6 py-4 flex items-center gap-3 flex-wrap no-print">
         <button onClick={()=>nav(isPed?{p:'pediatric',patientId:patient.id,assessmentId}:{p:'adult',patientId:patient.id,assessmentId})}
-          className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ {isPed?'トレーニング処方に戻る':'L項目・検査に戻る'}</button>
-        <h1 className="text-lg font-bold text-gray-900 flex-1">印刷プレビュー</h1>
+          className="text-blue-600 flex items-center gap-1 text-sm font-medium whitespace-nowrap flex-shrink-0">◀ {isPed?'トレーニング処方に戻る':'L項目・検査に戻る'}</button>
+        <h1 className="text-lg font-bold text-gray-900 flex-1 whitespace-nowrap">印刷プレビュー</h1>
         <div className="flex rounded-xl overflow-hidden border border-gray-200">
           <button onClick={()=>setDocType('patient')} className={`px-4 py-2 text-sm font-medium ${docType==='patient'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>👨‍👩‍👧 患者配布用</button>
           <button onClick={()=>setDocType('plan')} className={`px-4 py-2 text-sm font-medium ${docType==='plan'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>📋 管理計画書</button>
           <button onClick={()=>setDocType('billing')} className={`px-4 py-2 text-sm font-medium ${docType==='billing'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>💰 算定メモ</button>
         </div>
+        <div className="flex rounded-xl overflow-hidden border border-gray-200" title="用紙サイズ">
+          {['B5','A4'].map(sz=>(
+            <button key={sz} onClick={()=>setPaper(sz)} className={`px-3 py-2 text-sm font-medium ${paper===sz?'bg-gray-700 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>{sz}</button>
+          ))}
+        </div>
         <button onClick={()=>window.print()} className="flex items-center gap-2 bg-blue-600 text-white px-5 py-2.5 rounded-xl font-medium hover:bg-blue-700">🖨️ 印刷する</button>
         <button onClick={()=>nav({p:'home'})} className="flex items-center gap-2 bg-gray-100 text-gray-700 px-4 py-2.5 rounded-xl text-sm hover:bg-gray-200">🏠 最初に戻る</button>
       </div>
 
-      <div className="print-sheet" style={{maxWidth:'680px',margin:'24px auto',background:'white',boxShadow:'0 2px 16px #0002',padding:'12mm 12mm'}}>
+      {/* 選択した用紙サイズを印刷に反映（@page）＋@page非対応環境でも実寸が出るよう印刷時の用紙幅を固定 */}
+      <style>{`@page{size:${paper};margin:8mm 10mm}@media print{.print-sheet{width:${PAPER[paper].w}mm !important;max-width:${PAPER[paper].w}mm !important;margin:0 auto !important}}`}</style>
+      <div className="print-sheet" style={{maxWidth:`${PAPER[paper].prev}px`,margin:'24px auto',background:'white',boxShadow:'0 2px 16px #0002',padding:'12mm 12mm'}}>
         {!clinic.name && (
           <div className="border-2 border-dashed border-orange-300 bg-orange-50 rounded-xl px-4 py-3 mb-4 text-sm text-orange-700 no-print">
             ⚠ クリニック情報が未設定です — 設定画面から登録してください
@@ -3468,7 +3692,7 @@ function PrintPreview({assessmentId}) {
                 : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA}/>)}
 
         <div style={{marginTop:'14px',paddingTop:'8px',borderTop:'1px solid #e5e7eb',fontSize:'10px',color:'#aaa',display:'flex',justifyContent:'space-between'}}>
-          <span>口腔機能管理アプリ v1.0.0</span>
+          <span>口腔機能管理アプリ v{APP_VERSION}</span>
           <span>{formatDate(new Date().toISOString())}</span>
         </div>
       </div>
@@ -3760,6 +3984,10 @@ function PlanPediatric({a, patient, ageYears, prev, clinic}){
   const sc = a.scoring||{};
   const ln = lipForceNorm(ageYears, patient.gender);
   const tn = pedTongueNorm(ageYears);
+  // 平均・-1SDから3段階評価（良好／やや弱め／不足・低舌圧）
+  const lipGrade = gradeBySD(a.lipClosureForce, ln?ln.minus1sd:null, ln?ln.mean:null, '不足');
+  const tongueGrade = gradeBySD(a.maxTonguePressure, tn?tn.cutoff:null, tn?tn.mean:null, '低舌圧');
+  const gradeBg = g => g&&g.key==='low' ? '#fef2f2' : g&&g.key==='mid' ? '#fffbeb' : '#fff';
   const bodyIdx = (a.height && a.weight) ? computeBodyIndex(ageYears, a.height, a.weight) : null;
   const patterns = (a.diagnosis?.matchedPatterns||[]);
   const trainings = prescribeTrainings(patterns);
@@ -3787,19 +4015,19 @@ function PlanPediatric({a, patient, ageYears, prev, clinic}){
             <tr><th style={PT_TH}>検査</th>{prev && <th style={{...PT_TH,textAlign:'center'}}>前回</th>}<th style={{...PT_TH,textAlign:'center'}}>今回</th><th style={PT_TH}>基準（年齢別）</th><th style={{...PT_TH,textAlign:'center'}}>判定</th></tr>
           </thead>
           <tbody>
-            <tr style={{background:a.lipLow?'#fef2f2':'#fff'}}>
+            <tr style={{background:gradeBg(lipGrade)}}>
               <td style={PT_TD}>口唇閉鎖力（りっぷるくん）</td>
               {prev && <td style={{...PT_TD,textAlign:'center',color:'#6b7280'}}>{pv.lipClosureForce?`${pv.lipClosureForce}N`:'—'}</td>}
               <td style={{...PT_TD,textAlign:'center',fontWeight:'600'}}>{a.lipClosureForce?`${a.lipClosureForce}N`:'未検査'}</td>
-              <td style={{...PT_TD,fontSize:'9.5px'}}>{ln?`${ln.age}歳${ln.gender==='f'?'女':'男'} 平均${ln.mean}・-1SD ${ln.minus1sd}N以下で不足`:'—'}</td>
-              <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:a.lipLow?'#dc2626':'#16a34a'}}>{a.lipClosureForce?(a.lipLow?'不足':'良好'):'—'}</td>
+              <td style={{...PT_TD,fontSize:'9.5px'}}>{ln?`${ln.age}歳${ln.gender==='f'?'女':'男'} 平均${ln.mean}・-1SD ${ln.minus1sd}N`:'—'}</td>
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:lipGrade?lipGrade.color:'#16a34a'}}>{a.lipClosureForce?(lipGrade?lipGrade.label:'良好'):'—'}</td>
             </tr>
-            <tr style={{background:a.tongueLow?'#fef2f2':'#fff'}}>
+            <tr style={{background:gradeBg(tongueGrade)}}>
               <td style={PT_TD}>最大舌圧（JMS舌圧計）</td>
               {prev && <td style={{...PT_TD,textAlign:'center',color:'#6b7280'}}>{pv.maxTonguePressure?`${pv.maxTonguePressure}kPa`:'—'}</td>}
               <td style={{...PT_TD,textAlign:'center',fontWeight:'600'}}>{a.maxTonguePressure?`${a.maxTonguePressure}kPa`:'未検査'}</td>
-              <td style={{...PT_TD,fontSize:'9.5px'}}>{tn?`${tn.age}歳 平均${tn.mean}・cut-off ${tn.cutoff}kPa以下で低舌圧`:'—'}</td>
-              <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:a.tongueLow?'#dc2626':'#16a34a'}}>{a.maxTonguePressure?(a.tongueLow?'低舌圧':'良好'):'—'}</td>
+              <td style={{...PT_TD,fontSize:'9.5px'}}>{tn?`${tn.age}歳 平均${tn.mean}・cut-off ${tn.cutoff}kPa`:'—'}</td>
+              <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:tongueGrade?tongueGrade.color:'#16a34a'}}>{a.maxTonguePressure?(tongueGrade?tongueGrade.label:'良好'):'—'}</td>
             </tr>
             <tr style={{background:bodyIdx&&bodyIdx.abnormal?'#fef2f2':'#fff'}}>
               <td style={PT_TD}>体格（{bodyIdx?bodyIdx.name:'カウプ/ローレル'}）</td>
@@ -3897,6 +4125,8 @@ function App() {
   );
 }
 
+runMigrations();       // 保存データの形を現行版へ（render前・データ読込前に一度だけ）
+initVersionMarker();   // 新規端末の更新案内抑止マーカー
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 <script>
