@@ -426,8 +426,10 @@ input[type=checkbox], input[type=radio] {
 body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
 /* 用紙サイズは印刷プレビューのA4/B5切替で@pageを上書き（下のmarginは既定） */
 @page { margin: 8mm 10mm; }
+.print-only { display:none; }   /* 画面では隠し、印刷時のみ表示（管理計画書の2部目など） */
 @media print {
   .no-print { display:none !important; }
+  .print-only { display:block !important; }
   body { background:white; }
   /* プレビュー用の枠・余白を解除してB5の@page余白に任せる */
   .print-sheet { max-width:none !important; width:auto !important; margin:0 !important; padding:0 !important; box-shadow:none !important; }
@@ -678,7 +680,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '41';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '43';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 1;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1578,6 +1580,18 @@ function Btn({onClick,children,cls='',variant='primary'}) {
     onClick={()=>{ if(Date.now()-tap.current.firedAt<700) return; fire(); }}
     className={`${base} ${v} ${cls}`}>{children}</button>;
 }
+// iPad対策のドロップイン版：Btnと同じtouchend発火を、見た目（className）を変えずに素のbutton置換で付与する。
+// 「入力直後の1タップ目がキーボードを閉じるだけでclickが発火しない」iPadの挙動を回避する用途。
+function TapButton({onClick, className, children, disabled, title}) {
+  const tap = useRef({x:0,y:0,moved:false,firedAt:0});
+  const fire = () => { if(!disabled && onClick) onClick(); };
+  return <button type="button" title={title} disabled={disabled} className={className}
+    onTouchStart={e=>{const t=e.touches[0]; tap.current={x:t.clientX,y:t.clientY,moved:false,firedAt:tap.current.firedAt};}}
+    onTouchMove={e=>{const t=e.touches[0]; const r=tap.current; if(Math.abs(t.clientX-r.x)>10||Math.abs(t.clientY-r.y)>12) r.moved=true;}}
+    onTouchEnd={e=>{const r=tap.current; if(!r.moved){ e.preventDefault(); r.firedAt=Date.now(); fire(); }}}
+    onClick={()=>{ if(Date.now()-tap.current.firedAt<700) return; fire(); }}>
+    {children}</button>;
+}
 function NavBtns({onBack,onNext,nextLabel}) {
   return (
     <div className="flex gap-3 pt-2">
@@ -2101,8 +2115,8 @@ function Settings() {
                 <input type="text" value={grp.input} onChange={e=>grp.setInput(e.target.value)}
                   onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();addStaff(grp.key,grp.setInput)(grp.input);}}}
                   placeholder={grp.ph} className={inputCls}/>
-                <button onClick={()=>addStaff(grp.key,grp.setInput)(grp.input)}
-                  className="flex-shrink-0 px-4 py-3 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">追加</button>
+                <TapButton onClick={()=>addStaff(grp.key,grp.setInput)(grp.input)}
+                  className="flex-shrink-0 px-4 py-3 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">追加</TapButton>
               </div>
               {(form[grp.key]||[]).length===0
                 ? <p className="text-xs text-gray-400">未登録</p>
@@ -2110,7 +2124,7 @@ function Settings() {
                     {(form[grp.key]||[]).map((nm,i)=>(
                       <div key={i} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50">
                         <span className="flex-1 text-sm text-gray-800">{nm}</span>
-                        <button onClick={()=>removeStaff(grp.key,i)} className="p-1 text-gray-400 hover:text-red-500 rounded text-lg" title="削除">🗑️</button>
+                        <TapButton onClick={()=>removeStaff(grp.key,i)} className="p-1 text-gray-400 hover:text-red-500 rounded text-lg" title="削除">🗑️</TapButton>
                       </div>
                     ))}
                   </div>}
@@ -2138,10 +2152,10 @@ function Settings() {
             {form.logo && <button onClick={()=>setForm(p=>({...p,logo:''}))} className="px-4 py-2 bg-red-50 text-red-600 rounded-lg text-sm">ロゴを削除</button>}
           </div>
         </div>
-        <button onClick={()=>{setClinic(form);setSaved(true);setTimeout(()=>setSaved(false),2000);}}
+        <TapButton onClick={()=>{setClinic(form);setSaved(true);setTimeout(()=>setSaved(false),2000);}}
           className={`w-full py-4 rounded-2xl font-semibold text-white ${saved?'bg-green-500':'bg-blue-600 hover:bg-blue-700'}`}>
           {saved?'💾 保存しました ✓':'💾 設定を保存'}
-        </button>
+        </TapButton>
 
         {/* データのバックアップ */}
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-5">
@@ -2160,13 +2174,13 @@ function Settings() {
             {autoPw ? (
               <div className="flex items-center gap-2">
                 <span className="flex-1 text-sm text-green-700">✓ パスワード保存済み（1タップ有効）</span>
-                <button onClick={()=>{ save('autoBackupPw',''); setAutoPw(''); }} className="px-3 py-1.5 rounded-lg text-sm bg-white border border-gray-200 text-gray-600">解除</button>
+                <TapButton onClick={()=>{ save('autoBackupPw',''); setAutoPw(''); }} className="px-3 py-1.5 rounded-lg text-sm bg-white border border-gray-200 text-gray-600">解除</TapButton>
               </div>
             ) : (
               <div className="flex gap-2">
                 <input type="password" value={autoPwInput} onChange={e=>setAutoPwInput(e.target.value)} placeholder="保存するパスワード（4文字以上）" className={inputCls}/>
-                <button onClick={()=>{ if(autoPwInput.length<4){setMsg({type:'err',text:'パスワードは4文字以上で設定してください'});return;} save('autoBackupPw',autoPwInput); setAutoPw(autoPwInput); setAutoPwInput(''); setMsg({type:'ok',text:'1タップバックアップを有効にしました'}); }}
-                  className="flex-shrink-0 px-4 py-3 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">保存</button>
+                <TapButton onClick={()=>{ if(autoPwInput.length<4){setMsg({type:'err',text:'パスワードは4文字以上で設定してください'});return;} save('autoBackupPw',autoPwInput); setAutoPw(autoPwInput); setAutoPwInput(''); setMsg({type:'ok',text:'1タップバックアップを有効にしました'}); }}
+                  className="flex-shrink-0 px-4 py-3 rounded-xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">保存</TapButton>
               </div>
             )}
             <p className="text-[11px] text-gray-400">※パスワードはこの端末内にのみ保存されます（端末内にはもともと元データがあるため、端末上の安全性は変わりません）。暗号化はバックアップ<strong>ファイル</strong>を第三者から守るためのものです。保存先はiCloud Drive等の同期フォルダにすると端末故障にも備えられます。</p>
@@ -2176,7 +2190,7 @@ function Settings() {
             <p className="text-sm font-medium text-gray-700">📤 書き出し（バックアップ作成）</p>
             <input type="password" value={expPw} onChange={e=>setExpPw(e.target.value)} placeholder="パスワード（4文字以上）" className={inputCls}/>
             <input type="password" value={expPw2} onChange={e=>setExpPw2(e.target.value)} placeholder="パスワード（確認）" className={inputCls}/>
-            <button onClick={doExport} disabled={!!busy} className="w-full py-3 rounded-xl font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">🔐 暗号化して書き出す</button>
+            <TapButton onClick={doExport} disabled={!!busy} className="w-full py-3 rounded-xl font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">🔐 暗号化して書き出す</TapButton>
             <p className="text-xs text-amber-600">⚠️ パスワードを忘れると復元できません。安全な場所に控えてください。</p>
           </div>
 
@@ -2185,7 +2199,7 @@ function Settings() {
             <input ref={importRef} type="file" accept="application/json,.json" className="hidden" onChange={onImportFile}/>
             <button onClick={()=>importRef.current?.click()} className="w-full py-3 rounded-xl text-sm bg-gray-100 text-gray-700 hover:bg-gray-200 break-all">📁 {impName?('選択中：'+impName):'バックアップファイルを選ぶ'}</button>
             <input type="password" value={impPw} onChange={e=>setImpPw(e.target.value)} placeholder="バックアップのパスワード" className={inputCls}/>
-            <button onClick={doImport} disabled={!!busy} className="w-full py-3 rounded-xl font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50">♻️ 復元する（全置き換え）</button>
+            <TapButton onClick={doImport} disabled={!!busy} className="w-full py-3 rounded-xl font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50">♻️ 復元する（全置き換え）</TapButton>
             <p className="text-xs text-rose-600">⚠️ 復元すると、この端末の現在のデータは全て置き換わります。</p>
           </div>
         </div>
@@ -2407,9 +2421,9 @@ function PatientForm({patientId, returnTo}) {
             <textarea value={form.notes} onChange={e=>set('notes',e.target.value)} rows={3} placeholder="特記事項など" className={`${ic} resize-none`}/>
           </div>
         </div>
-        <button onClick={save_} className={`w-full py-4 rounded-2xl font-semibold text-white ${saved?'bg-green-500':'bg-blue-600 hover:bg-blue-700'}`}>
+        <TapButton onClick={save_} className={`w-full py-4 rounded-2xl font-semibold text-white ${saved?'bg-green-500':'bg-blue-600 hover:bg-blue-700'}`}>
           {saved?'💾 保存しました ✓':existing?'💾 変更を保存':'💾 患者を登録'}
-        </button>
+        </TapButton>
       </div>
     </div>
   );
@@ -3623,6 +3637,54 @@ function PrintPreview({assessmentId}) {
   const isPlan = docType==='plan';
   const isBilling = docType==='billing'; // 算定メモ（院内用）タブ
 
+  // 1枚分の本文（タイトル＋基本情報＋本体＋医院フッター）。管理計画書は2部印刷のため2回描画する
+  const renderSheetBody = () => (
+    <>
+      {!isBilling && (
+        <div style={{textAlign:'center',marginBottom:'12px'}}>
+          <h1 style={{fontSize:'18px',fontWeight:'700',color:isPlan?'#111':'#1e40af',marginBottom:'2px'}}>
+            {isPlan ? `${isPed?'口腔機能発達不全症':'口腔機能低下症'} 管理計画書` : 'お口の機能チェック結果のお知らせ'}
+          </h1>
+          {/* 管理計画書はサブタイトルなし。患者配布用のみ説明を表示 */}
+          {!isPlan && <p style={{fontSize:'11px',color:'#666'}}>{isPed?'口腔機能発達不全症の評価とご家庭でのトレーニング':'口腔機能低下症の評価と今後の管理方針'}</p>}
+          <div style={{height:'2px',background:isPlan?'#374151':'#1d4ed8',margin:'6px 48px 0'}}/>
+        </div>
+      )}
+      {!isBilling && (
+        <div style={{display:'flex',gap:'18px',marginBottom:'12px',background:'#f8fafc',borderRadius:'10px',padding:'8px 14px',flexWrap:'wrap'}}>
+          {(isPlan
+            ? [['カルテNo', patient.chartNo||'—'],['氏名',patient.name],['生年月日',birthWareki],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日（指導日）',formatDate(a.date)]]
+            : [['お名前',`${patient.name} さん`],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日',formatDate(a.date)]]
+          ).map(([l,v])=>(
+            <div key={l}><p style={{fontSize:'10px',color:'#888'}}>{l}</p><p style={{fontWeight:'600',color:'#111',fontSize:'13px'}}>{v}</p></div>
+          ))}
+        </div>
+      )}
+      {isBilling
+        ? <BillingMemo a={a} patient={patient} age={age} isPed={isPed}/>
+        : isPlan
+          ? (isPed
+              ? <PlanPediatric a={a} patient={patient} ageYears={age.years} prev={prevA} clinic={clinic}/>
+              : <PlanAdult a={a} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA} clinic={clinic}/>)
+          : (isPed
+              ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name} prev={prevA}/>
+              : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA}/>)}
+      {/* 医院フッター：左下にロゴ＋医院名・住所・電話、右下に日付（アプリ名は印字しない） */}
+      <div style={{marginTop:'14px',paddingTop:'8px',borderTop:'1px solid #e5e7eb',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
+          {clinic.logo && <img src={clinic.logo} alt="Logo" style={{height:'42px',objectFit:'contain'}}/>}
+          {clinic.name && (
+            <div style={{lineHeight:1.45}}>
+              <p style={{fontSize:'12px',fontWeight:'700',color:'#111'}}>{clinic.name}</p>
+              <p style={{fontSize:'10px',color:'#666'}}>{[clinic.address, clinic.phone?`TEL: ${clinic.phone}`:''].filter(Boolean).join('　')}</p>
+            </div>
+          )}
+        </div>
+        <span style={{fontSize:'10px',color:'#888'}}>{formatDate(new Date().toISOString())}</span>
+      </div>
+    </>
+  );
+
   return (
     <div className="min-h-screen bg-gray-100">
       <div className="bg-white shadow-sm px-6 py-4 flex items-center gap-3 flex-wrap no-print">
@@ -3645,56 +3707,16 @@ function PrintPreview({assessmentId}) {
 
       {/* 選択した用紙サイズを印刷に反映（@page）＋@page非対応環境でも実寸が出るよう印刷時の用紙幅を固定 */}
       <style>{`@page{size:${paper};margin:8mm 10mm}@media print{.print-sheet{width:${PAPER[paper].w}mm !important;max-width:${PAPER[paper].w}mm !important;margin:0 auto !important}}`}</style>
+      {isPlan && <p className="text-center text-xs text-gray-500 pt-4 no-print">📄 管理計画書は2部印刷されます（1部 カルテ用・1部 患者用）</p>}
       <div className="print-sheet" style={{maxWidth:`${PAPER[paper].prev}px`,margin:'24px auto',background:'white',boxShadow:'0 2px 16px #0002',padding:'12mm 12mm'}}>
         {!clinic.name && (
           <div className="border-2 border-dashed border-orange-300 bg-orange-50 rounded-xl px-4 py-3 mb-4 text-sm text-orange-700 no-print">
             ⚠ クリニック情報が未設定です — 設定画面から登録してください
           </div>
         )}
-        {clinic.name && (
-          <div className="flex items-center justify-between mb-3 pb-2 border-b border-gray-200">
-            <div>
-              <p className="font-bold text-gray-900" style={{fontSize:'15px'}}>{clinic.name}</p>
-              <p className="text-xs text-gray-600">{[clinic.address, clinic.phone?`TEL: ${clinic.phone}`:'', clinic.doctor?`担当: ${clinic.doctor}`:''].filter(Boolean).join('　')}</p>
-            </div>
-            {clinic.logo && <img src={clinic.logo} alt="Logo" style={{height:'40px',objectFit:'contain'}}/>}
-          </div>
-        )}
-        {/* 算定メモタブは専用ヘッダ＋テーブルを描画するため、患者配布用/計画書の共通ヘッダは出さない */}
-        {!isBilling && (
-          <div style={{textAlign:'center',marginBottom:'12px'}}>
-            <h1 style={{fontSize:'18px',fontWeight:'700',color:isPlan?'#111':'#1e40af',marginBottom:'2px'}}>
-              {isPlan ? `${isPed?'口腔機能発達不全症':'口腔機能低下症'} 管理計画書` : 'お口の機能チェック結果のお知らせ'}
-            </h1>
-            <p style={{fontSize:'11px',color:'#666'}}>{isPlan ? '院内保管・カルテ添付用' : (isPed?'口腔機能発達不全症の評価とご家庭でのトレーニング':'口腔機能低下症の評価と今後の管理方針')}</p>
-            <div style={{height:'2px',background:isPlan?'#374151':'#1d4ed8',margin:'6px 48px 0'}}/>
-          </div>
-        )}
-        {!isBilling && (
-          <div style={{display:'flex',gap:'18px',marginBottom:'12px',background:'#f8fafc',borderRadius:'10px',padding:'8px 14px',flexWrap:'wrap'}}>
-            {(isPlan
-              ? [['カルテNo', patient.chartNo||'—'],['氏名',patient.name],['生年月日',birthWareki],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日（指導日）',formatDate(a.date)]]
-              : [['お名前',`${patient.name} さん`],['年齢',age.label],['性別',patient.gender==='male'?'男性':'女性'],['評価日',formatDate(a.date)]]
-            ).map(([l,v])=>(
-              <div key={l}><p style={{fontSize:'10px',color:'#888'}}>{l}</p><p style={{fontWeight:'600',color:'#111',fontSize:'13px'}}>{v}</p></div>
-            ))}
-          </div>
-        )}
-
-        {isBilling
-          ? <BillingMemo a={a} patient={patient} age={age} isPed={isPed}/>
-          : isPlan
-            ? (isPed
-                ? <PlanPediatric a={a} patient={patient} ageYears={age.years} prev={prevA} clinic={clinic}/>
-                : <PlanAdult a={a} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA} clinic={clinic}/>)
-            : (isPed
-                ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name} prev={prevA}/>
-                : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA}/>)}
-
-        <div style={{marginTop:'14px',paddingTop:'8px',borderTop:'1px solid #e5e7eb',fontSize:'10px',color:'#aaa',display:'flex',justifyContent:'space-between'}}>
-          <span>口腔機能管理アプリ v{APP_VERSION}</span>
-          <span>{formatDate(new Date().toISOString())}</span>
-        </div>
+        {renderSheetBody()}
+        {/* 管理計画書は同じ内容を2部印刷（画面では2部目を隠し、印刷時のみ次ページに出す） */}
+        {isPlan && <div className="pb-next print-only">{renderSheetBody()}</div>}
       </div>
     </div>
   );
