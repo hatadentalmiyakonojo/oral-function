@@ -678,7 +678,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '1.1.0';        // ★配布のたびに更新（フッター表示＆更新案内のトリガー）
+const APP_VERSION = '41';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 1;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1924,7 +1924,7 @@ function Home() {
           <span className="bg-green-100 text-green-700 text-xs font-medium px-3 py-1 rounded-full">利用可能</span>
         </button>
       </div>
-      <footer className="text-center py-6 text-xs text-gray-400">Version {APP_VERSION}　/　データ形式 v{DATA_SCHEMA_VERSION}</footer>
+      <footer className="text-center py-6 text-xs text-gray-400">アプリ v{APP_VERSION}　/　データ形式 v{DATA_SCHEMA_VERSION}</footer>
     </div>
   );
 }
