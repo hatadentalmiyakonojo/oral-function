@@ -602,9 +602,9 @@ const MEAS_SPEC = {
   saxonTest:        {min:0,   max:15,   step:0.1, avg:3.0}, // サクソンテスト g/2min
   biteForce:        {min:0,   max:2000, step:10,  avg:600}, // 咬合力 N
   remainingTeeth:   {min:0,   max:32,   step:1,   avg:24},  // 残存歯数 本
-  ddk_pa:           {min:0,   max:10,   step:1,   avg:6},   // オーラルディアドコ パ（整数刻み）
-  ddk_ta:           {min:0,   max:10,   step:1,   avg:6},   // 〃 タ
-  ddk_ka:           {min:0,   max:10,   step:1,   avg:6},   // 〃 カ
+  ddk_pa:           {min:0,   max:10,   step:0.1, avg:6},   // オーラルディアドコ パ（健口くん・0.1刻み）
+  ddk_ta:           {min:0,   max:10,   step:0.1, avg:6},   // 〃 タ
+  ddk_ka:           {min:0,   max:10,   step:0.1, avg:6},   // 〃 カ
   maxTonguePressure:{min:0,   max:60,   step:1,   avg:35},  // 最大舌圧 kPa
   masticationScore: {min:0,   max:500,  step:10,  avg:150}, // グルコース濃度 mg/dL
   eatScore:         {min:0,   max:40,   step:1,   avg:1},   // EAT-10
@@ -680,15 +680,27 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '43';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
-const DATA_SCHEMA_VERSION = 1;      // 保存データの“形”の版
+const APP_VERSION = '45';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
-//   将来 v1→v2 で評価に項目追加する例:
-//   (load,save)=>{ const a=load('assessments',[]); save('assessments', a.map(x=>({...x, 新項目: x.新項目 ?? null}))); }
 //   ※splitName/EMPTY_M等の「項目の有無で旧データを吸収する」既存処理はそのまま残す。ここは構造変更専用。
 const migrations = [
-  // (v0→v1) 既存データは定義上すでにv1のため意図的に無し
+  null, // (v0→v1) 既存データは定義上すでにv1のため無し
+  // (v1→v2) 機能低下症のDDK(パ・タ・カ)を0.1刻みに変更。既存の整数値("6")を1桁小数("6.0")へ正規化し、
+  //         新しい選択肢("6.0"…)と一致させる（編集時の空欄化・誤上書きを防ぐ）。冪等。
+  (load, save) => {
+    const fix = v => (v===''||v==null||isNaN(parseFloat(v))) ? v : parseFloat(v).toFixed(1);
+    const asm = load('assessments', []).map(a => {
+      if(!a || !a.measurements) return a;
+      const m = a.measurements;
+      if(m.ddk_pa==null && m.ddk_ta==null && m.ddk_ka==null) return a;
+      const nm = {...m};
+      ['ddk_pa','ddk_ta','ddk_ka'].forEach(k => { if(nm[k]!=null) nm[k] = fix(nm[k]); });
+      return {...a, measurements: nm};
+    });
+    save('assessments', asm);
+  },
 ];
 // 起動時に一度だけ実行（Reactのrender前）。冪等。失敗時は印を付けず次回起動で再試行。
 function runMigrations(){
@@ -1689,10 +1701,16 @@ function PatientSelect({onSelect,selected,flowPage}) {
   const {patients, assessments, deletePatient} = useS();
   const [q,setQ] = useState('');
   const [del,setDel] = useState(null); // 削除確認モーダル対象の患者id
-  const filtered = patients.filter(p=>{
+  const [showAll,setShowAll] = useState(false); // 既定は流れに応じた年齢で絞り込み。trueで全年齢表示
+  // ひらがな入力でもカタカナのフリガナにヒットさせる（hira2kataで変換）
+  const textMatched = patients.filter(p=>{
     const lq=q.toLowerCase();
-    // ひらがな入力でもカタカナのフリガナにヒットさせる（hira2kataで変換）
     return p.name.toLowerCase().includes(lq)||p.kana.toLowerCase().includes(lq)||p.kana.includes(hira2kata(lq))||p.no.includes(lq)||(p.chartNo||'').toLowerCase().includes(lq);
+  });
+  // 発達不全症フロー＝小児(18歳未満)のみ／低下症フロー＝成人(18歳以上)のみ（境界18歳は本アプリ既定）。showAllで全年齢
+  const filtered = showAll ? textMatched : textMatched.filter(p=>{
+    const yrs = computeAge(p.birth).years;
+    return flowPage==='pediatric' ? yrs<18 : yrs>=18;
   });
   // 患者ごとの最新評価日時。最近評価した患者ほど上に表示
   const lastAssessAt = useMemo(()=>{
@@ -1717,12 +1735,25 @@ function PatientSelect({onSelect,selected,flowPage}) {
         <h2 className="font-semibold text-gray-800 mb-4">患者を選択してください</h2>
         <input type="search" value={q} onChange={e=>setQ(e.target.value)} placeholder="カルテ番号・氏名・フリガナで検索"
           className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-400"/>
-        {/* 検索欄の下：新規患者の追加 */}
-        <div className="flex items-center mb-3">
+        {/* 検索欄の下：新規患者の追加（左）／年齢の絞り込みトグル（右） */}
+        <div className="flex items-center justify-between gap-2 mb-3">
           <button onClick={()=>nav({p:'patientForm',returnTo:flowPage})}
             className="text-sm font-medium text-blue-600 hover:text-blue-700 px-2 py-2 -ml-2 rounded-lg hover:bg-blue-50">＋新規患者</button>
+          <div className="flex gap-1 items-center flex-shrink-0">
+            <TapButton onClick={()=>setShowAll(false)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium ${!showAll?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>{flowPage==='pediatric'?'小児のみ':'成人のみ'}</TapButton>
+            <TapButton onClick={()=>setShowAll(true)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium ${showAll?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>すべて表示</TapButton>
+          </div>
         </div>
         <div className="space-y-2 max-h-96 overflow-y-auto">
+          {sorted.length===0 && (
+            <p className="text-sm text-gray-400 text-center py-6">
+              {patients.length===0 ? '患者がまだいません。「＋新規患者」から登録してください。'
+                : (!showAll && textMatched.length>0) ? `この区分（${flowPage==='pediatric'?'小児・18歳未満':'成人・18歳以上'}）の患者がいません。「すべて表示」で全員を表示できます。`
+                : '該当する患者がいません。'}
+            </p>
+          )}
           {sorted.map(p=>{
             const age=computeAge(p.birth);
             const lastAt=lastAssessAt[p.id];
