@@ -629,8 +629,9 @@ function formatDate(s) {
 }
 // ひらがな→カタカナ変換（検索でひらがな入力をカタカナのフリガナにヒットさせる）
 const hira2kata = s => (s||'').replace(/[ぁ-ゖ]/g, c=>String.fromCharCode(c.charCodeAt(0)+0x60));
-function computeAge(birthDate) {
-  const birth = new Date(birthDate), now = new Date();
+// refDate省略時は現在。検査日(評価日)を指定すると「その日時点の年齢」を返す（過去データ入力・印刷で使用）
+function computeAge(birthDate, refDate) {
+  const birth = new Date(birthDate), now = refDate ? new Date(refDate) : new Date();
   let years = now.getFullYear() - birth.getFullYear();
   let months = now.getMonth() - birth.getMonth();
   if (months < 0) { years--; months += 12; }
@@ -639,6 +640,10 @@ function computeAge(birthDate) {
   const label = years === 0 ? `${months}か月` : `${years}歳${months > 0 ? months+'か月' : ''}`;
   return { years, months, label };
 }
+// 検査日（input[type=date]の'YYYY-MM-DD'）と保存用ISOの相互変換。pad2を再利用
+const ymdToday = () => { const d=new Date(); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; };
+const ymdFromIso = iso => { const d=new Date(iso); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; };
+const ymdToIso = ymd => { const [y,m,dd]=(ymd||'').split('-').map(Number); return (y&&m&&dd) ? new Date(y,m-1,dd,12,0,0).toISOString() : new Date().toISOString(); };
 // カウプ指数（6歳未満）= [体重(kg)/身長(cm)²]×10⁴。判定境界はJADS令和6年資料準拠
 function computeKaup(h, w) {
   const hv = parseFloat(h), wv = parseFloat(w);
@@ -680,7 +685,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '45';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '47';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -864,6 +869,74 @@ function dataURLBytes(dataURL){
   const i = dataURL.indexOf(',');
   const b64 = i>=0 ? dataURL.slice(i+1) : dataURL;
   return Math.round(b64.length * 3 / 4);
+}
+
+// ═══════════════════════════════════════════════
+// カルテ表紙OCR（端末内・Tesseract.js）── 新規患者の「仮入力」補助。
+//   写真は端末内(WASM)で認識し外部送信しない。ライブラリは初回利用時にCDNから動的読込
+//   （本体は完全オフラインのまま。OCRは初回だけネット要）。誤読しうるため必ず目視確認。
+// ═══════════════════════════════════════════════
+let _tesseractLoading = null, _ocrWorkerPromise = null;
+function loadTesseract(){
+  if(typeof window!=='undefined' && window.Tesseract) return Promise.resolve();
+  if(_tesseractLoading) return _tesseractLoading;
+  _tesseractLoading = new Promise((resolve,reject)=>{
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.onload=()=>resolve();
+    s.onerror=()=>{ _tesseractLoading=null; reject(new Error('OCRライブラリを読み込めませんでした（ネット接続をご確認ください）')); };
+    document.head.appendChild(s);
+  });
+  return _tesseractLoading;
+}
+async function getOcrWorker(onProgress){
+  if(_ocrWorkerPromise) return _ocrWorkerPromise;
+  _ocrWorkerPromise = (async()=>{
+    await loadTesseract();
+    return await window.Tesseract.createWorker('jpn+eng', 1, {
+      logger: m => { if(onProgress && m.status==='recognizing text') onProgress(m.progress); }
+    });
+  })();
+  _ocrWorkerPromise.catch(()=>{ _ocrWorkerPromise=null; }); // 失敗時は次回再試行
+  return _ocrWorkerPromise;
+}
+async function runOcr(dataURL, onProgress){
+  const worker = await getOcrWorker(onProgress);
+  const { data } = await worker.recognize(dataURL);
+  return (data && data.text) || '';
+}
+// OCRテキストから カルテ番号・氏名・フリガナ・生年月日 をベストエフォート抽出（印刷カルテ表紙想定）。
+//   ★レイアウトは歯科ソフト依存。当院の表紙書式に合わせてラベル語・正規表現をここで調整可。
+function extractKarteFields(text){
+  const res = {chartNo:'', sei:'', mei:'', seiKana:'', meiKana:'', birth:'', raw:text||'', hits:{}};
+  if(!text) return res;
+  // 全角英数記号→半角、全角スペース/区切りの正規化
+  const norm = text
+    .replace(/[０-９Ａ-Ｚａ-ｚ]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0))
+    .replace(/／/g,'/').replace(/[―ー－]/g,'-').replace(/．/g,'.').replace(/：/g,':');
+  const lines = norm.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const eraStart = {'令和':2019,'平成':1989,'昭和':1926,'大正':1912,'明治':1868,'R':2019,'H':1989,'S':1926,'T':1912,'M':1868};
+  const pad=n=>String(n).padStart(2,'0');
+  const ok=(y,m,d)=> y>=1900&&y<=2100&&m>=1&&m<=12&&d>=1&&d<=daysInMonth(y,m);
+  // 生年月日（和暦）：令和6年4月1日 / 昭33.4.1 / R6-4-1 等
+  const mW = norm.match(/(令和|平成|昭和|大正|明治|R|H|S|T|M)\s*(元|\d{1,2})\s*[.\-年]\s*(\d{1,2})\s*[.\-月]\s*(\d{1,2})/);
+  if(mW){ const es=eraStart[mW[1]], ey=mW[2]==='元'?1:+mW[2], y=es+ey-1, m=+mW[3], d=+mW[4];
+    if(es&&ok(y,m,d)){ res.birth=`${y}-${pad(m)}-${pad(d)}`; res.hits.birth='wareki'; } }
+  // 生年月日（西暦）：1958/4/1 / 1958-04-01 / 1958年4月1日
+  if(!res.birth){ const mG=norm.match(/(19\d{2}|20\d{2})\s*[.\-\/年]\s*(\d{1,2})\s*[.\-\/月]\s*(\d{1,2})/);
+    if(mG){ const y=+mG[1],m=+mG[2],d=+mG[3]; if(ok(y,m,d)){ res.birth=`${y}-${pad(m)}-${pad(d)}`; res.hits.birth='seireki'; } } }
+  // カルテ番号：ラベル近傍の数字（日付の数字とは別パターン）
+  const mC = norm.match(/(?:カルテ|診察券|患者)\s*(?:番号|No\.?)\s*[:#＃]?\s*(\d{1,8})/i) || norm.match(/\bNo\.?\s*[:#＃]?\s*(\d{2,8})\b/i);
+  if(mC){ res.chartNo=mC[1]; res.hits.chartNo='label'; }
+  // ラベル行の値（同じ行の続き→無ければ次の行）を返す
+  const after = (re)=>{ for(let i=0;i<lines.length;i++){ const m=lines[i].match(re); if(m){ const r=lines[i].slice(m.index+m[0].length).replace(/^[\s:：]+/,'').replace(/\s*[様殿]\s*$/,'').trim(); if(r) return r; if(lines[i+1]) return lines[i+1].replace(/\s*[様殿]\s*$/,'').trim(); } } return ''; };
+  // フリガナ（カタカナ化して姓名分割）
+  const k = after(/(?:フリガナ|ふりがな|カナ)/);
+  if(k){ const kk=hira2kata(k).replace(/[^ァ-ヶー\s]/g,'').trim(); const [a,b]=splitName(kk); if(a){ res.seiKana=a; res.meiKana=b||''; res.hits.kana=1; } }
+  // 氏名（漢字。姓名は空白で分割。無ければ全部を姓に）
+  const nm = after(/(?:氏\s*名|患者氏名|名\s*前)/);
+  if(nm){ const [a,b]=splitName(nm); if(a){ res.sei=a; res.mei=b||''; res.hits.name=1; } }
+  return res;
 }
 
 // ═══════════════════════════════════════════════
@@ -2374,12 +2447,55 @@ function PatientForm({patientId, returnTo}) {
     setSaved(true); setTimeout(back,800);
   };
   const ic = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400";
+  // ── カルテ表紙OCR（端末内・任意の補助。写真は保存も送信もせず処理後に破棄）──
+  const ocrInputRef = useRef();
+  const [ocr, setOcr] = useState({phase:'idle', progress:0, message:''});
+  const [ocrApplied, setOcrApplied] = useState(false);
+  const applyExtracted = (f) => {
+    let any=false;
+    if(f.chartNo){ set('chartNo', f.chartNo); any=true; }
+    if(f.sei){ set('sei', f.sei); any=true; }
+    if(f.mei){ set('mei', f.mei); }
+    if(f.seiKana){ set('seiKana', f.seiKana); kanaLock.current.seiKana=true; any=true; }
+    if(f.meiKana){ set('meiKana', f.meiKana); kanaLock.current.meiKana=true; }
+    if(f.birth){ set('birth', f.birth); setBd(parseBirth(f.birth)); any=true; } // 和暦UIも同期
+    return any;
+  };
+  const onOcrPick = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value=''; // 同じ写真の再選択を許可
+    if(!file) return;
+    try {
+      setOcr({phase:'loading', progress:0, message:''});
+      const dataURL = await compressImageFile(file, 1600, 0.85); // OCR用に高解像度（端末内のみ）
+      setOcr({phase:'recognizing', progress:0, message:''});
+      const text = await runOcr(dataURL, p=>setOcr(s=>({...s, phase:'recognizing', progress:p})));
+      const filled = applyExtracted(extractKarteFields(text));
+      setOcrApplied(filled);
+      setOcr({phase: filled?'done':'error', progress:1, message: filled?'':'読み取れる項目がありませんでした。手入力してください。'});
+      // dataURL はここでスコープ外＝保存もIndexedDB格納もネット送信もしない
+    } catch(ex){
+      setOcr({phase:'error', progress:0, message:'読み取りに失敗しました：'+((ex&&ex.message)||'不明なエラー')+'（手入力でご登録ください）'});
+    }
+  };
   return (
     <div className="min-h-screen bg-gray-50">
       <Header onBack={back} backLabel="戻る" title={existing?'患者情報の編集':'新規患者を追加'}/>
       <div className="max-w-xl mx-auto px-6 py-8 space-y-5">
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-5">
           {existing && <p className="text-sm text-gray-500">患者番号: <span className="font-mono font-bold text-gray-800">{existing.no}</span></p>}
+          {!existing && (
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3">
+              <input ref={ocrInputRef} type="file" accept="image/*" capture="environment" data-testid="ocr-karte-input" className="hidden" onChange={onOcrPick}/>
+              <TapButton onClick={()=>ocrInputRef.current&&ocrInputRef.current.click()} disabled={ocr.phase==='loading'||ocr.phase==='recognizing'}
+                className="w-full text-sm font-semibold rounded-xl px-4 py-3 text-white bg-indigo-600 disabled:opacity-50">
+                {ocr.phase==='recognizing'?`⏳ 読み取り中… ${Math.round(ocr.progress*100)}%`:ocr.phase==='loading'?'⏳ 準備中…':'📷 カルテ表紙から読み取り'}
+              </TapButton>
+              <p className="text-[11px] text-gray-500 mt-1.5">印刷されたカルテ表紙を撮影すると、カルテ番号・氏名・生年月日を自動で仮入力します（画像は端末内で処理し、保存も送信もしません）。</p>
+              {ocr.phase==='error' && <p className="text-xs text-red-600 mt-1.5">{ocr.message}</p>}
+              {ocrApplied && <p className="text-xs text-amber-700 font-medium mt-1.5">⚠️ 読み取り結果（要確認）— 内容が正しいか必ず確認してから保存してください。</p>}
+            </div>
+          )}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">カルテ番号</label>
             <input type="text" value={form.chartNo} onChange={e=>set('chartNo',e.target.value)} placeholder="例）12345" className={ic} inputMode="numeric"/>
@@ -2464,13 +2580,18 @@ function PatientForm({patientId, returnTo}) {
 // SHARED MODALS（フロー共通）
 // ═══════════════════════════════════════════════
 // 担当者選択モーダル：担当医師・担当衛生士を設定リストから選ぶ。初期選択は各リスト先頭
-function StaffSelectModal({docList, hygList, doc, setDoc, hyg, setHyg, onConfirm}) {
+function StaffSelectModal({docList, hygList, doc, setDoc, hyg, setHyg, date, setDate, onConfirm}) {
   const selCls = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400";
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6">
       <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
-        <h3 className="font-bold text-gray-900 mb-4">担当者を選択</h3>
+        <h3 className="font-bold text-gray-900 mb-4">検査日・担当者</h3>
         <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">検査日（評価日）</label>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} max={ymdToday()} className={selCls}/>
+            <p className="text-[11px] text-gray-400 mt-1">過去の検査を入力するときは日付を変更してください（既定は今日）</p>
+          </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">担当医師</label>
             {docList.length===0
@@ -2603,6 +2724,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
   const [staffHygienist, setStaffHygienist] = useState(loaded?(loaded.staffHygienist||''):'');
   const [showStaff, setShowStaff] = useState(false); // 担当者選択モーダル
+  const [examDate, setExamDate] = useState(loaded ? ymdFromIso(loaded.date) : ymdToday()); // 検査日（評価日）。新規は今日・過去日も入力可
   const [showBackWarn, setShowBackWarn] = useState(false); // 入力途中の戻る警告
   // 顔貌写真（最大4枚・画面表示のみ）。各要素 {id,date,size,dataURL?,missing?}
   //   新規追加分はメモリ上にdataURLを保持し、doSave時に初めてIndexedDBへput（孤児ゼロ方式）。
@@ -2611,13 +2733,14 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
   // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
   const [tmpDoc, setTmpDoc] = useState('');
+  const [tmpDate, setTmpDate] = useState(ymdToday()); // モーダルの検査日一時値（決定で確定）
   const [tmpHyg, setTmpHyg] = useState('');
   // モーダルを開いたら先頭を初期選択にセット
-  useEffect(()=>{ if(showStaff){ setTmpDoc(docList[0]||''); setTmpHyg(hygList[0]||''); } }, [showStaff]);
-  const confirmStaff = () => { setStaffDoctor(tmpDoc); setStaffHygienist(tmpHyg); setShowStaff(false); };
+  useEffect(()=>{ if(showStaff){ setTmpDoc(docList[0]||''); setTmpHyg(hygList[0]||''); setTmpDate(examDate); } }, [showStaff]);
+  const confirmStaff = () => { setStaffDoctor(tmpDoc); setStaffHygienist(tmpHyg); setExamDate(tmpDate); setShowStaff(false); };
 
   const patient = patients.find(p=>p.id===pid);
-  const age = patient ? computeAge(patient.birth) : null;
+  const age = patient ? computeAge(patient.birth, (isLoaded && loaded) ? loaded.date : examDate) : null;
   const ageMonths = age ? age.years*12 + age.months : null;
   // 離乳完了の境界＝概ね18か月。手動切替が指定されていればそれを優先
   const isPreWeaning = phaseOverride ? (phaseOverride==='pre') : (ageMonths!=null && ageMonths < 18);
@@ -2667,7 +2790,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   },[assessments, pid, savedId]);
 
   // 検査間隔3か月警告（前回検査値が入った直近評価日から3暦月未満なら算定不可）。基準日は読込時=評価日、新規=本日
-  const baseDate = isLoaded && loaded ? loaded.date : new Date();
+  const baseDate = isLoaded && loaded ? loaded.date : examDate;
   const warnLip = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.lipClosureForce, savedId), baseDate), [assessments, pid, savedId]);
   const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.maxTonguePressure, savedId), baseDate), [assessments, pid, savedId]);
 
@@ -2727,7 +2850,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
 
   const doSave = () => {
     // 既存評価の更新時は元の日付を保持。新規作成時のみ現在日時をセット
-    const keepDate = (isLoaded && loaded) ? loaded.date : new Date().toISOString();
+    const keepDate = (isLoaded && loaded) ? loaded.date : ymdToIso(examDate);
     // 評価オブジェクトにはメタのみ保存（dataURLはIndexedDBへ）。missingタイルも参照として残す。
     const photoMeta = photos.map(p=>({id:p.id, date:p.date, size:p.size}));
     const a = {id:savedId||generateId(),patientId:pid,date:keepDate,type:'pediatric',
@@ -2788,7 +2911,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
       {step!=='select' && <StepBar steps={PED_STEPS} current={step} onJump={k=>setStep(k)}/>}
       <div className="flex-1 overflow-y-auto">
 
-        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('questionnaire');setShowStaff(docList.length>0||hygList.length>0);}} selected={pid} flowPage="pediatric"/>}
+        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('questionnaire');setShowStaff(true);}} selected={pid} flowPage="pediatric"/>}
 
         {step==='questionnaire' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
@@ -2993,7 +3116,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
       </div>
       {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
       {showStaff && !isLoaded && !ro && (
-        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} onConfirm={confirmStaff}/>
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
       )}
       {/* 入力途中の戻る警告 */}
       {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}/>}
@@ -3171,16 +3294,18 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
   const [staffHygienist, setStaffHygienist] = useState(loaded?(loaded.staffHygienist||''):'');
   const [showStaff, setShowStaff] = useState(false); // 担当者選択モーダル
+  const [examDate, setExamDate] = useState(loaded ? ymdFromIso(loaded.date) : ymdToday()); // 検査日（評価日）。新規は今日・過去日も入力可
   const [showBackWarn, setShowBackWarn] = useState(false); // 入力途中の戻る警告
   const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
   // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
   const [tmpDoc, setTmpDoc] = useState('');
+  const [tmpDate, setTmpDate] = useState(ymdToday()); // モーダルの検査日一時値（決定で確定）
   const [tmpHyg, setTmpHyg] = useState('');
-  useEffect(()=>{ if(showStaff){ setTmpDoc(docList[0]||''); setTmpHyg(hygList[0]||''); } }, [showStaff]);
-  const confirmStaff = () => { setStaffDoctor(tmpDoc); setStaffHygienist(tmpHyg); setShowStaff(false); };
+  useEffect(()=>{ if(showStaff){ setTmpDoc(docList[0]||''); setTmpHyg(hygList[0]||''); setTmpDate(examDate); } }, [showStaff]);
+  const confirmStaff = () => { setStaffDoctor(tmpDoc); setStaffHygienist(tmpHyg); setExamDate(tmpDate); setShowStaff(false); };
 
   const patient = patients.find(p=>p.id===pid);
-  const age = patient ? computeAge(patient.birth) : null;
+  const age = patient ? computeAge(patient.birth, (isLoaded && loaded) ? loaded.date : examDate) : null;
   const tongueCut = adultTongueCutoff(age?age.years:null, patient?patient.gender:null); // 年齢性別の舌圧cut-off
   // 前回の評価（同一患者の成人評価のうち最新。今セッションで保存した分は除く）
   const prevA = useMemo(()=>{
@@ -3190,7 +3315,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   },[assessments, pid, savedId]);
 
   // 検査間隔3か月警告（舌圧・咬合圧・口腔粘膜湿潤度。前回検査値が入った直近評価日から3暦月未満なら算定不可）
-  const baseDate = isLoaded && loaded ? loaded.date : new Date();
+  const baseDate = isLoaded && loaded ? loaded.date : examDate;
   const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).maxTonguePressure, savedId), baseDate), [assessments, pid, savedId]);
   const warnBite = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).biteForce, savedId), baseDate), [assessments, pid, savedId]);
   const warnMoist = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).oralMoisture, savedId), baseDate), [assessments, pid, savedId]);
@@ -3238,7 +3363,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
 
   const doSave = () => {
     // 既存評価の更新時は元の日付を保持。新規作成時のみ現在日時をセット
-    const keepDate = (isLoaded && loaded) ? loaded.date : new Date().toISOString();
+    const keepDate = (isLoaded && loaded) ? loaded.date : ymdToIso(examDate);
     const a={id:savedId||generateId(),patientId:pid,date:keepDate,type:'adult',
       checkedLItems:allL,measurements:m,diagnosis:diag,notes,staffDoctor,staffHygienist};
     savedId?updateAssessment(a):addAssessment(a);
@@ -3266,7 +3391,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       {step!=='select' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)}/>}
       <div className="flex-1 overflow-y-auto">
 
-        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('litems');setShowStaff(docList.length>0||hygList.length>0);}} selected={pid} flowPage="adult"/>}
+        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('litems');setShowStaff(true);}} selected={pid} flowPage="adult"/>}
 
         {step==='litems' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
@@ -3444,7 +3569,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       </div>
       {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
       {showStaff && !isLoaded && !ro && (
-        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} onConfirm={confirmStaff}/>
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
       )}
       {/* 入力途中の戻る警告 */}
       {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}/>}
@@ -3655,7 +3780,7 @@ function PrintPreview({assessmentId}) {
   const a = getAssessment(assessmentId);
   const patient = a ? getPatient(a.patientId) : null;
   if(!a||!patient) return <div className="flex items-center justify-center min-h-screen text-gray-500">評価データが見つかりません</div>;
-  const age = computeAge(patient.birth);
+  const age = computeAge(patient.birth, a.date); // 印刷は評価日時点の年齢（過去記録・カウプ/ローレルも正しく）
   const isPed = a.type==='pediatric';
   // 前回の評価（同一患者・同一種別・今回より前の日付で最新）
   const prevA = assessments
