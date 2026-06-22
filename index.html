@@ -685,7 +685,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '47';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '49';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -872,40 +872,10 @@ function dataURLBytes(dataURL){
 }
 
 // ═══════════════════════════════════════════════
-// カルテ表紙OCR（端末内・Tesseract.js）── 新規患者の「仮入力」補助。
-//   写真は端末内(WASM)で認識し外部送信しない。ライブラリは初回利用時にCDNから動的読込
-//   （本体は完全オフラインのまま。OCRは初回だけネット要）。誤読しうるため必ず目視確認。
+// カルテ表紙の文字取り込み（iOS Live Text等でコピーした文字を貼り付け→解析）。
+//   端末内で文字解析するだけ（画像処理・外部送信なし）。誤読しうるため必ず目視確認。
 // ═══════════════════════════════════════════════
-let _tesseractLoading = null, _ocrWorkerPromise = null;
-function loadTesseract(){
-  if(typeof window!=='undefined' && window.Tesseract) return Promise.resolve();
-  if(_tesseractLoading) return _tesseractLoading;
-  _tesseractLoading = new Promise((resolve,reject)=>{
-    const s=document.createElement('script');
-    s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-    s.onload=()=>resolve();
-    s.onerror=()=>{ _tesseractLoading=null; reject(new Error('OCRライブラリを読み込めませんでした（ネット接続をご確認ください）')); };
-    document.head.appendChild(s);
-  });
-  return _tesseractLoading;
-}
-async function getOcrWorker(onProgress){
-  if(_ocrWorkerPromise) return _ocrWorkerPromise;
-  _ocrWorkerPromise = (async()=>{
-    await loadTesseract();
-    return await window.Tesseract.createWorker('jpn+eng', 1, {
-      logger: m => { if(onProgress && m.status==='recognizing text') onProgress(m.progress); }
-    });
-  })();
-  _ocrWorkerPromise.catch(()=>{ _ocrWorkerPromise=null; }); // 失敗時は次回再試行
-  return _ocrWorkerPromise;
-}
-async function runOcr(dataURL, onProgress){
-  const worker = await getOcrWorker(onProgress);
-  const { data } = await worker.recognize(dataURL);
-  return (data && data.text) || '';
-}
-// OCRテキストから カルテ番号・氏名・フリガナ・生年月日 をベストエフォート抽出（印刷カルテ表紙想定）。
+// 貼り付けテキストから カルテ番号・氏名・フリガナ・生年月日 をベストエフォート抽出。
 //   ★レイアウトは歯科ソフト依存。当院の表紙書式に合わせてラベル語・正規表現をここで調整可。
 function extractKarteFields(text){
   const res = {chartNo:'', sei:'', mei:'', seiKana:'', meiKana:'', birth:'', raw:text||'', hits:{}};
@@ -913,29 +883,55 @@ function extractKarteFields(text){
   // 全角英数記号→半角、全角スペース/区切りの正規化
   const norm = text
     .replace(/[０-９Ａ-Ｚａ-ｚ]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0))
-    .replace(/／/g,'/').replace(/[―ー－]/g,'-').replace(/．/g,'.').replace(/：/g,':');
+    .replace(/／/g,'/').replace(/[―－]/g,'-').replace(/．/g,'.').replace(/：/g,':'); // 長音ーは残す（カナ用）
   const lines = norm.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
   const eraStart = {'令和':2019,'平成':1989,'昭和':1926,'大正':1912,'明治':1868,'R':2019,'H':1989,'S':1926,'T':1912,'M':1868};
   const pad=n=>String(n).padStart(2,'0');
   const ok=(y,m,d)=> y>=1900&&y<=2100&&m>=1&&m<=12&&d>=1&&d<=daysInMonth(y,m);
-  // 生年月日（和暦）：令和6年4月1日 / 昭33.4.1 / R6-4-1 等
-  const mW = norm.match(/(令和|平成|昭和|大正|明治|R|H|S|T|M)\s*(元|\d{1,2})\s*[.\-年]\s*(\d{1,2})\s*[.\-月]\s*(\d{1,2})/);
-  if(mW){ const es=eraStart[mW[1]], ey=mW[2]==='元'?1:+mW[2], y=es+ey-1, m=+mW[3], d=+mW[4];
-    if(es&&ok(y,m,d)){ res.birth=`${y}-${pad(m)}-${pad(d)}`; res.hits.birth='wareki'; } }
-  // 生年月日（西暦）：1958/4/1 / 1958-04-01 / 1958年4月1日
-  if(!res.birth){ const mG=norm.match(/(19\d{2}|20\d{2})\s*[.\-\/年]\s*(\d{1,2})\s*[.\-\/月]\s*(\d{1,2})/);
-    if(mG){ const y=+mG[1],m=+mG[2],d=+mG[3]; if(ok(y,m,d)){ res.birth=`${y}-${pad(m)}-${pad(d)}`; res.hits.birth='seireki'; } } }
-  // カルテ番号：ラベル近傍の数字（日付の数字とは別パターン）
-  const mC = norm.match(/(?:カルテ|診察券|患者)\s*(?:番号|No\.?)\s*[:#＃]?\s*(\d{1,8})/i) || norm.match(/\bNo\.?\s*[:#＃]?\s*(\d{2,8})\b/i);
-  if(mC){ res.chartNo=mC[1]; res.hits.chartNo='label'; }
-  // ラベル行の値（同じ行の続き→無ければ次の行）を返す
-  const after = (re)=>{ for(let i=0;i<lines.length;i++){ const m=lines[i].match(re); if(m){ const r=lines[i].slice(m.index+m[0].length).replace(/^[\s:：]+/,'').replace(/\s*[様殿]\s*$/,'').trim(); if(r) return r; if(lines[i+1]) return lines[i+1].replace(/\s*[様殿]\s*$/,'').trim(); } } return ''; };
-  // フリガナ（カタカナ化して姓名分割）
-  const k = after(/(?:フリガナ|ふりがな|カナ)/);
-  if(k){ const kk=hira2kata(k).replace(/[^ァ-ヶー\s]/g,'').trim(); const [a,b]=splitName(kk); if(a){ res.seiKana=a; res.meiKana=b||''; res.hits.kana=1; } }
-  // 氏名（漢字。姓名は空白で分割。無ければ全部を姓に）
-  const nm = after(/(?:氏\s*名|患者氏名|名\s*前)/);
-  if(nm){ const [a,b]=splitName(nm); if(a){ res.sei=a; res.mei=b||''; res.hits.name=1; } }
+  const parseDate=(str)=>{
+    let m = str.match(/(令和|平成|昭和|大正|明治|R|H|S|T|M)\s*(元|\d{1,2})\s*[.\-年]\s*(\d{1,2})\s*[.\-月]\s*(\d{1,2})/);
+    if(m){ const es=eraStart[m[1]], ey=m[2]==='元'?1:+m[2], y=es+ey-1; if(es&&ok(y,+m[3],+m[4])) return `${y}-${pad(+m[3])}-${pad(+m[4])}`; }
+    m = str.match(/(19\d{2}|20\d{2})\s*[.\-\/年]\s*(\d{1,2})\s*[.\-\/月]\s*(\d{1,2})/);
+    if(m && ok(+m[1],+m[2],+m[3])) return `${+m[1]}-${pad(+m[2])}-${pad(+m[3])}`;
+    return '';
+  };
+  // 生年月日：「生年月日」ラベル基準（同行→次行）。性別欄以降は切る。無ければ全文から。
+  let dateSeg='';
+  for(let i=0;i<lines.length;i++){ if(/生\s*年\s*月\s*日/.test(lines[i])){
+    let seg = lines[i].replace(/^.*生\s*年\s*月\s*日/, '');
+    if(!/\d|令|平|昭|大|明/.test(seg) && lines[i+1]) seg += ' '+lines[i+1];
+    dateSeg = seg.split(/性\s*別/)[0]; break;
+  }}
+  res.birth = parseDate(dateSeg) || parseDate(norm);
+  if(res.birth) res.hits.birth=1;
+  // 氏名セル領域（受診者の「氏名」ラベル以降、生年月日/住所/性別 等の手前まで）を集約。
+  // この欄に「カルテ番号 → フリガナ(カタカナ) → 漢字氏名」が並ぶため、文字種で振り分ける。
+  let started=false; const reg=[];
+  for(const l of lines){
+    if(!started){ const i=l.search(/氏[\s_]*名/); if(i>=0 && !/被\s*保\s*険/.test(l.slice(0,i))){ started=true; const rest=l.replace(/^.*氏[\s_]*名[\s:：_]*/,''); if(rest) reg.push(rest); } continue; }
+    if(/生\s*年\s*月|住\s*所|性\s*別|職\s*業|被\s*保\s*険|続\s*柄/.test(l)) break;
+    reg.push(l);
+  }
+  // 1行に続けて書かれている場合も、生年月日/住所/性別 以降は氏名セル外として切る
+  const region = reg.join(' ').split(/生\s*年\s*月|住\s*所|性\s*別/)[0].trim();
+  if(region){
+    // カルテ番号＝数字列（最長）
+    const dig=(region.match(/\d{2,8}/g)||[]).sort((a,b)=>b.length-a.length)[0];
+    if(dig){ res.chartNo=dig; res.hits.chartNo='name-cell'; }
+    // フリガナ＝カタカナ列（ひらがなはカナ化）。最初をセイ、残りをメイ
+    const kata=(hira2kata(region).match(/[ァ-ヶ][ァ-ヶー]*/g))||[];
+    if(kata.length){ res.seiKana=kata[0]; res.meiKana=kata.slice(1).join('')||''; res.hits.kana='name-cell'; }
+    // 氏名＝漢字列（用紙のラベル漢字は除外）。最初を姓、残りを名
+    const kanji=(region.replace(/[受診者氏名被保険資格性別職業傷病部位住所続柄公費負担医療給]/g,' ').match(/[一-鿿々]+/g))||[];
+    if(kanji.length){ res.sei=kanji[0]; res.mei=kanji.slice(1).join('')||''; res.hits.name=1; }
+  }
+  // フリガナ専用ラベルがある別書式のフォールバック
+  if(!res.seiKana){ for(let i=0;i<lines.length;i++){ const l=lines[i]; const m=l.match(/(フリガナ|ふりがな|カナ)/);
+    if(m){ if(/被\s*保\s*険/.test(l.slice(0,m.index))){ continue; }
+      let v=l.slice(m.index+m[0].length).replace(/^[:：\s]+/,'').trim(); if(!v&&lines[i+1]) v=lines[i+1].trim();
+      const kk=hira2kata(v).replace(/[^ァ-ヶー\s]/g,'').trim(); if(kk){ const [a,b]=splitName(kk); res.seiKana=a; res.meiKana=b||''; res.hits.kana='label'; } break; } } }
+  // カルテ番号がまだ取れていなければラベル（カルテ番号/診察券番号/No）から
+  if(!res.chartNo){ const mC=norm.match(/(?:カルテ|診察券|患者)\s*(?:番号|No\.?)\s*[:#＃]?\s*(\d{1,8})/i); if(mC){ res.chartNo=mC[1]; res.hits.chartNo='label'; } }
   return res;
 }
 
@@ -2447,10 +2443,10 @@ function PatientForm({patientId, returnTo}) {
     setSaved(true); setTimeout(back,800);
   };
   const ic = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400";
-  // ── カルテ表紙OCR（端末内・任意の補助。写真は保存も送信もせず処理後に破棄）──
-  const ocrInputRef = useRef();
-  const [ocr, setOcr] = useState({phase:'idle', progress:0, message:''});
+  // ── カルテ表紙から取り込み：iOS Live Text等でコピーした文字を貼り付け→各欄へ振り分け（端末内処理・送信なし）──
+  const [pasteText, setPasteText] = useState('');
   const [ocrApplied, setOcrApplied] = useState(false);
+  const [ocrMsg, setOcrMsg] = useState('');
   const applyExtracted = (f) => {
     let any=false;
     if(f.chartNo){ set('chartNo', f.chartNo); any=true; }
@@ -2461,22 +2457,18 @@ function PatientForm({patientId, returnTo}) {
     if(f.birth){ set('birth', f.birth); setBd(parseBirth(f.birth)); any=true; } // 和暦UIも同期
     return any;
   };
-  const onOcrPick = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    e.target.value=''; // 同じ写真の再選択を許可
-    if(!file) return;
+  const importText = (t) => {
+    if(!t || !t.trim()){ setOcrMsg('文字がありません。コピーした内容を貼り付けてください。'); return; }
+    const filled = applyExtracted(extractKarteFields(t));
+    setOcrApplied(filled);
+    setOcrMsg(filled ? '' : '読み取れる項目がありませんでした。貼り付け内容をご確認ください。');
+  };
+  const doClipboard = async () => {
     try {
-      setOcr({phase:'loading', progress:0, message:''});
-      const dataURL = await compressImageFile(file, 1600, 0.85); // OCR用に高解像度（端末内のみ）
-      setOcr({phase:'recognizing', progress:0, message:''});
-      const text = await runOcr(dataURL, p=>setOcr(s=>({...s, phase:'recognizing', progress:p})));
-      const filled = applyExtracted(extractKarteFields(text));
-      setOcrApplied(filled);
-      setOcr({phase: filled?'done':'error', progress:1, message: filled?'':'読み取れる項目がありませんでした。手入力してください。'});
-      // dataURL はここでスコープ外＝保存もIndexedDB格納もネット送信もしない
-    } catch(ex){
-      setOcr({phase:'error', progress:0, message:'読み取りに失敗しました：'+((ex&&ex.message)||'不明なエラー')+'（手入力でご登録ください）'});
-    }
+      const t = await navigator.clipboard.readText();
+      if(t){ setPasteText(t); importText(t); }
+      else setOcrMsg('クリップボードが空です。文字をコピーしてからお試しください。');
+    } catch(e){ setOcrMsg('クリップボードを読めませんでした。下の欄に貼り付けて「取り込む」を押してください。'); }
   };
   return (
     <div className="min-h-screen bg-gray-50">
@@ -2485,15 +2477,19 @@ function PatientForm({patientId, returnTo}) {
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-5">
           {existing && <p className="text-sm text-gray-500">患者番号: <span className="font-mono font-bold text-gray-800">{existing.no}</span></p>}
           {!existing && (
-            <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3">
-              <input ref={ocrInputRef} type="file" accept="image/*" capture="environment" data-testid="ocr-karte-input" className="hidden" onChange={onOcrPick}/>
-              <TapButton onClick={()=>ocrInputRef.current&&ocrInputRef.current.click()} disabled={ocr.phase==='loading'||ocr.phase==='recognizing'}
-                className="w-full text-sm font-semibold rounded-xl px-4 py-3 text-white bg-indigo-600 disabled:opacity-50">
-                {ocr.phase==='recognizing'?`⏳ 読み取り中… ${Math.round(ocr.progress*100)}%`:ocr.phase==='loading'?'⏳ 準備中…':'📷 カルテ表紙から読み取り'}
-              </TapButton>
-              <p className="text-[11px] text-gray-500 mt-1.5">印刷されたカルテ表紙を撮影すると、カルテ番号・氏名・生年月日を自動で仮入力します（画像は端末内で処理し、保存も送信もしません）。</p>
-              {ocr.phase==='error' && <p className="text-xs text-red-600 mt-1.5">{ocr.message}</p>}
-              {ocrApplied && <p className="text-xs text-amber-700 font-medium mt-1.5">⚠️ 読み取り結果（要確認）— 内容が正しいか必ず確認してから保存してください。</p>}
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3 space-y-2">
+              <p className="text-sm font-semibold text-indigo-800">📋 カルテ表紙から取り込み（任意）</p>
+              <p className="text-[11px] text-gray-500 leading-relaxed">「写真」アプリでカルテの受診者欄の文字を長押し→コピーし、下に貼り付けて「取り込む」を押すと、カルテ番号・氏名・フリガナ・生年月日を仮入力します（端末内で処理・送信なし）。</p>
+              <TapButton onClick={doClipboard} className="w-full text-sm font-semibold rounded-xl px-4 py-2.5 text-white bg-indigo-600">📋 クリップボードから取り込み</TapButton>
+              <textarea value={pasteText} onChange={e=>setPasteText(e.target.value)} rows={3} data-testid="ocr-paste"
+                placeholder="またはここに貼り付け（例：氏名 86754- タケダ ナナ 武田 奈々 生年月日 平成10年8月5日）"
+                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"/>
+              <div className="flex gap-2">
+                <TapButton onClick={()=>importText(pasteText)} className="flex-1 text-sm font-semibold rounded-xl px-4 py-2.5 text-white bg-indigo-600">取り込む</TapButton>
+                <TapButton onClick={()=>{setPasteText('');setOcrMsg('');setOcrApplied(false);}} className="text-sm rounded-xl px-4 py-2.5 bg-gray-100 text-gray-600">クリア</TapButton>
+              </div>
+              {ocrMsg && <p className="text-xs text-red-600">{ocrMsg}</p>}
+              {ocrApplied && <p className="text-xs text-amber-700 font-medium">⚠️ 取り込み結果（要確認）— 内容が正しいか必ず確認してから保存してください。</p>}
             </div>
           )}
           <div>
