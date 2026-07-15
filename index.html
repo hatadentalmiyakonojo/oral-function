@@ -591,7 +591,7 @@ function BillingBox({qualifies, sections}){
 // ═══════════════════════════════════════════════
 const MEAS_SPEC = {
   // --- 小児（口腔機能発達不全症）---
-  lipForce:         {min:0,   max:20,   step:0.1, avg:8.0}, // 口唇閉鎖力 N（りっぷるくん）
+  lipForce:         {min:0,   max:30,   step:0.1, avg:8.0}, // 口唇閉鎖力 N（りっぷるくん）
   pedTongue:        {min:0,   max:60,   step:0.1, avg:30},  // 最大舌圧 kPa（JMS舌圧計・0.1刻み）
   pedHeight:        {min:40,  max:190,  step:1,   avg:110}, // 身長 cm
   pedWeight:        {min:2,   max:100,  step:0.5, avg:20},  // 体重 kg
@@ -685,7 +685,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '52';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '53';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
