@@ -685,7 +685,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '53';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '54';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -998,6 +998,84 @@ function extractKarteFields(text){
   if(!res.chartNo){ const mC=norm.match(/(?:カルテ|診察券|患者)\s*(?:番号|No\.?)\s*[:#＃]?\s*(\d{1,8})/i); if(mC){ res.chartNo=mC[1]; res.hits.chartNo='label'; } }
   return res;
 }
+
+// ═══════════════════════════════════════════════
+// 予測変換辞書（レセコン予約CSVの全患者取込）── この端末のlocalStorageのみ・バックアップ非含有
+//   カルテ番号→氏名・生年月日を引く辞書。患者一覧には表示せず、新規患者フォームの自動入力だけに使う。
+//   辞書はCSVから何度でも再取込できるためBACKUP_KEYSには含めない（バックアップ肥大防止）。
+// ═══════════════════════════════════════════════
+const CHART_DICT_KEY = 'chartDict';
+// Shift_JIS / UTF-8 を自動判定（日本のレセコンはShift_JISが多い）。両方デコードし見出し語の出現数で採点
+function decodeCsvBytes(buf){
+  let sj='', u8='';
+  try{ sj=new TextDecoder('shift_jis').decode(buf); }catch(e){}
+  try{ u8=new TextDecoder('utf-8',{fatal:false}).decode(buf); }catch(e){}
+  const score=s=>((s||'').match(/患者|氏名|生年月日|予約|番号/g)||[]).length;
+  return score(sj)>=score(u8) ? {text:(sj||u8), enc:'Shift_JIS'} : {text:(u8||sj), enc:'UTF-8'};
+}
+// クオート対応の簡易CSVパーサ（BOM除去・CRLF対応・空セルだけの行は除去）
+function parseCsvText(text){
+  const rows=[]; let i=0, field='', row=[], inQ=false; const s=(text||'').replace(/^﻿/,'');
+  while(i<s.length){ const c=s[i];
+    if(inQ){ if(c==='"'){ if(s[i+1]==='"'){ field+='"'; i+=2; continue; } inQ=false; i++; continue; } field+=c; i++; continue; }
+    if(c==='"'){ inQ=true; i++; continue; }
+    if(c===','){ row.push(field); field=''; i++; continue; }
+    if(c==='\r'){ i++; continue; }
+    if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; i++; continue; }
+    field+=c; i++; }
+  if(field!==''||row.length){ row.push(field); rows.push(row); }
+  return rows.filter(r=>r.some(x=>(x||'').trim()!==''));
+}
+// 列見出しの部分一致検索（空白は無視）。見つからなければ-1
+function findCsvCol(headers, cands){
+  for(let i=0;i<headers.length;i++){ const h=(headers[i]||'').replace(/\s/g,''); for(const c of cands) if(h.includes(c)) return i; }
+  return -1;
+}
+// CSVの生年月日（YYYY/MM/DD・YYYY-MM-DD・YYYY年M月D日）→ YYYY-MM-DD。読めなければ空
+function parseCsvBirth(v){
+  const m=String(v||'').trim().match(/(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})/);
+  return m ? m[1]+'-'+pad2(+m[2])+'-'+pad2(+m[3]) : '';
+}
+// カルテ番号の照合用正規化：全角→半角・空白除去・先頭ゼロ除去（辞書と入力の表記ゆれを吸収）
+function normChartNo(s){
+  const t=String(s==null?'':s).replace(/[０-９]/g,c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0)).replace(/\s/g,'');
+  return t.replace(/^0+(?=\d)/,'');
+}
+// CSV行列→辞書。患者番号でdedupし、氏名・生年月日は値のある行で補完。itemsは[番号,姓,名,生年月日]のタプル配列（容量最小化）
+function buildChartDict(rows, enc){
+  if(!rows.length) return {error:'ファイルが空か、読み取れませんでした。'};
+  const headers=rows[0];
+  const ci={no:findCsvCol(headers,['患者番号']), name:findCsvCol(headers,['患者氏名','患者名','氏名']), birth:findCsvCol(headers,['生年月日'])};
+  if(ci.no<0||ci.name<0) return {error:'「患者番号」「患者氏名」の列見出しが見つかりませんでした。CSVの1行目に見出し行があるか確認してください。'};
+  const byNo=new Map(); let skipNoNo=0;
+  for(let r=1;r<rows.length;r++){
+    const row=rows[r]; const no=(row[ci.no]||'').trim();
+    if(!no){ skipNoNo++; continue; }
+    const [sei,mei]=splitName(row[ci.name]||'');
+    const birth=ci.birth>=0?parseCsvBirth(row[ci.birth]):'';
+    const cur=byNo.get(no)||[no,'','',''];
+    if(sei){ cur[1]=sei; cur[2]=mei; }
+    if(birth) cur[3]=birth;
+    byNo.set(no,cur);
+  }
+  const items=[...byNo.values()].sort((a,b)=>(parseInt(a[0],10)||0)-(parseInt(b[0],10)||0));
+  const noBirth=items.filter(x=>!x[3]).length;
+  return {dict:{v:1, at:new Date().toISOString(), enc, n:items.length, items}, total:rows.length-1, skipNoNo, noBirth};
+}
+// 辞書の読み書き。読み出しは遅延キャッシュ（0.6MB級のJSON.parseを毎回避ける）
+let _chartDictCache;
+function getChartDict(){ if(_chartDictCache===undefined) _chartDictCache=load(CHART_DICT_KEY,null); return _chartDictCache; }
+// 保存は既存save()と違い、容量オーバー等の失敗を呼び出し元に返して画面表示させる
+function saveChartDict(dict){
+  try { localStorage.setItem(CHART_DICT_KEY, JSON.stringify(dict)); _chartDictCache=dict; return {ok:true}; }
+  catch(e){
+    const quota = e && (e.name==='QuotaExceededError' || e.code===22);
+    return {ok:false, error: quota
+      ? '辞書を保存できませんでした：ブラウザの保存容量が上限に達しています（前回の辞書はそのまま残っています）。バックアップを書き出してから不要な評価を整理し、もう一度お試しください。'
+      : '辞書の保存に失敗しました：'+((e&&e.message)||'不明なエラー')};
+  }
+}
+function clearChartDict(){ try{ localStorage.removeItem(CHART_DICT_KEY); }catch(e){} _chartDictCache=null; }
 
 // ═══════════════════════════════════════════════
 // バックアップ（パスワード暗号化）── CryptoJS(PBKDF2+AES)。localhost以外/iPadのLAN(http)でも動作
@@ -2143,9 +2221,9 @@ function Settings() {
   // 1タップ/日次バックアップ用に保存するパスワード（端末内のみ。詳細はUIの注記参照）
   const [autoPw, setAutoPw] = useState(()=>load('autoBackupPw',''));
   const [autoPwInput, setAutoPwInput] = useState('');
-  // ストレージ使用状況（localStorage実測＋写真メタ集計＋IndexedDB件数＋端末割当）
+  // ストレージ使用状況（localStorage実測＋写真メタ集計＋IndexedDB件数＋端末割当）。辞書取込後にも再計測する
   const [storageInfo, setStorageInfo] = useState(null);
-  useEffect(()=>{ (async()=>{
+  const measureStorage = async()=>{
     let chars=0; for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); chars += k.length + (localStorage.getItem(k)||'').length; }
     const bytes = chars*2; // UTF-16換算。Safariのおおよその上限は5MB
     const metas = assessments.flatMap(a=>a.photos||[]);
@@ -2153,7 +2231,41 @@ function Settings() {
     let est=null; try{ if(navigator.storage && navigator.storage.estimate) est=await navigator.storage.estimate(); }catch(e){}
     // 患者・評価数はstoreから数える（サンプル患者は初回保存までlocalStorageに無いため）
     setStorageInfo({bytes, patients:patients.length, asmts:assessments.length, photoN:metas.length, photoBytes:metas.reduce((s,p)=>s+(p.size||0),0), idbCount, est});
-  })(); },[]);
+  };
+  useEffect(()=>{ measureStorage(); },[]);
+  // --- 予測変換辞書（レセコン予約CSV取込）---
+  const dictFileRef = useRef();
+  const [dictInfo, setDictInfo] = useState(()=>{ const d=getChartDict(); return d?{at:d.at, enc:d.enc, n:d.n}:null; });
+  const [dictMsg, setDictMsg] = useState(null);
+  const [dictBusy, setDictBusy] = useState(false);
+  const dictMb = () => { try{ const s=localStorage.getItem(CHART_DICT_KEY); return s ? s.length*2/1024/1024 : 0; }catch(e){ return 0; } };
+  const onDictFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value=''; // 同じファイルの再選択を許可
+    if(!f) return;
+    setDictMsg(null); setDictBusy(true);
+    // 数万行のパースでUIが固まらないよう、busy表示を先に反映してから処理
+    setTimeout(async ()=>{
+      try {
+        const buf = await f.arrayBuffer();
+        const dec = decodeCsvBytes(buf);
+        const rows = parseCsvText(dec.text);
+        const res = buildChartDict(rows, dec.enc);
+        if(res.error){ setDictMsg({type:'err', text:res.error}); setDictBusy(false); return; }
+        const sv = saveChartDict(res.dict);
+        if(!sv.ok){ setDictMsg({type:'err', text:sv.error}); setDictBusy(false); return; }
+        setDictInfo({at:res.dict.at, enc:res.dict.enc, n:res.dict.n});
+        const skips=[]; if(res.skipNoNo) skips.push(`患者番号なし${res.skipNoNo}行スキップ`); if(res.noBirth) skips.push(`生年月日なし${res.noBirth}名`);
+        setDictMsg({type:'ok', text:`読み込みました：CSV ${res.total.toLocaleString()}行 → 患者${res.dict.n.toLocaleString()}名（${res.dict.enc}）${skips.length?'／'+skips.join('・'):''}`});
+        measureStorage();
+      } catch(ex){ setDictMsg({type:'err', text:'読み込みに失敗しました：'+((ex&&ex.message)||'不明なエラー')}); }
+      setDictBusy(false);
+    }, 60);
+  };
+  const onDictClear = () => {
+    if(!window.confirm('予測変換辞書を削除しますか？（登録済みの患者データには影響しません）')) return;
+    clearChartDict(); setDictInfo(null); setDictMsg(null); measureStorage();
+  };
   const doExport = () => {
     setMsg(null);
     if(typeof CryptoJS==='undefined'){ setMsg({type:'err',text:'暗号化ライブラリを読み込めていません（初回はネット接続が必要です）'}); return; }
@@ -2368,6 +2480,25 @@ function Settings() {
           </div>
         </div>
 
+        {/* 予測変換辞書：レセコン予約CSVの全患者を端末内に取込。患者一覧には出さず、新規登録の自動入力にだけ使う */}
+        <div className="bg-white rounded-2xl shadow-sm p-6 space-y-4">
+          <div>
+            <h2 className="font-semibold text-gray-800">📖 予測変換辞書（レセコンCSV）</h2>
+            <p className="text-xs text-gray-500 mt-1">レセコンの予約CSV（全患者分）を取り込むと、新規患者の登録時にカルテ番号を入れるだけで氏名・生年月日の候補が出て自動入力できます。患者一覧には表示されません。</p>
+          </div>
+          {dictInfo ? (
+            <div className="text-sm text-gray-700">取込済み：<span className="font-semibold">{dictInfo.n.toLocaleString()}名</span>
+              <span className="text-xs text-gray-400 ml-1">（{new Date(dictInfo.at).toLocaleDateString('ja-JP')} 取込・{dictInfo.enc}・約{dictMb().toFixed(1)}MB）</span></div>
+          ) : <p className="text-sm text-gray-400">未取込</p>}
+          <input ref={dictFileRef} type="file" accept=".csv,text/csv" data-testid="dict-csv-input" className="hidden" onChange={onDictFile}/>
+          <TapButton onClick={()=>dictFileRef.current&&dictFileRef.current.click()} disabled={dictBusy}
+            className="w-full py-3 rounded-xl font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50">
+            {dictBusy?'⏳ 読み込み中…（数万行でも数秒です）':'📥 予約CSVを取り込む（前回の辞書と置き換え）'}</TapButton>
+          {dictInfo && <TapButton onClick={onDictClear} className="w-full py-2 rounded-xl text-sm text-red-600 bg-red-50 hover:bg-red-100">🗑 辞書を削除</TapButton>}
+          {dictMsg && <p className={`text-sm ${dictMsg.type==='ok'?'text-green-600':'text-red-600'}`}>{dictMsg.text}</p>}
+          <p className="text-xs text-gray-400">辞書はこの端末の中だけに保存されます（バックアップには含まれません）。iPadごとに取込が必要です。患者が増えたら新しいCSVを取り込み直してください。</p>
+        </div>
+
         {/* ストレージ使用状況：メインデータ（localStorage）と写真（IndexedDB）の使用量を可視化 */}
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-4">
           <div>
@@ -2520,6 +2651,29 @@ function PatientForm({patientId, returnTo}) {
     if(f.birth){ set('birth', f.birth); setBd(parseBirth(f.birth)); any=true; } // 和暦UIも同期
     return any;
   };
+  // ── 予測変換辞書（設定画面で取り込んだレセコンCSV）：カルテ番号の前方一致で候補を出す ──
+  const dict = useMemo(()=> existing ? null : getChartDict(), []); // 新規登録時のみ。マウント時に1回読む（遅延キャッシュ）
+  const [dictPicked, setDictPicked] = useState(false); // 候補を適用済み（リストを閉じ、番号を手で変えたら再表示）
+  // 登録済み患者のカルテ番号集合（候補に「登録済み」バッジを出す）
+  const regNos = useMemo(()=> new Set(patients.map(p=>normChartNo(p.chartNo)).filter(Boolean)), [patients]);
+  const dictCands = useMemo(()=>{
+    if(!dict || !dict.items || dictPicked) return [];
+    const q = normChartNo(form.chartNo);
+    if(!q) return [];
+    const exact=[], pre=[];
+    for(const it of dict.items){
+      const n=normChartNo(it[0]);
+      if(n===q) exact.push(it);
+      else if(n.startsWith(q) && pre.length<8) pre.push(it);
+    }
+    return [...exact, ...pre].slice(0,8);
+  },[dict, form.chartNo, dictPicked]);
+  // 候補タップ→フォームへ適用（OCRのapplyExtractedと同型）。フリガナ・性別はCSVに無いため手入力
+  const applyDictEntry = (it) => {
+    set('chartNo', it[0]); set('sei', it[1]); set('mei', it[2]);
+    if(it[3]){ set('birth', it[3]); setBd(parseBirth(it[3])); }
+    setDictPicked(true);
+  };
   const onOcrPick = async (e) => {
     const file = e.target.files && e.target.files[0];
     e.target.value=''; // 同じ写真の再選択を許可
@@ -2557,7 +2711,25 @@ function PatientForm({patientId, returnTo}) {
           )}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">カルテ番号</label>
-            <input type="text" value={form.chartNo} onChange={e=>set('chartNo',e.target.value)} placeholder="例）12345" className={ic} inputMode="numeric"/>
+            <input type="text" value={form.chartNo} onChange={e=>{set('chartNo',e.target.value); setDictPicked(false);}} placeholder="例）12345" className={ic} inputMode="numeric"/>
+            {!existing && dict && dict.items && dict.items.length>0 && !form.chartNo &&
+              <p className="text-xs text-gray-400 mt-1">📖 カルテ番号を入力すると辞書（{dict.items.length.toLocaleString()}名）から候補が出ます</p>}
+            {dictCands.length>0 && (
+              <div className="mt-2 rounded-xl border border-indigo-200 bg-indigo-50/50 divide-y divide-indigo-100 overflow-hidden">
+                {dictCands.map(it=>(
+                  <TapButton key={it[0]} onClick={()=>applyDictEntry(it)}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-indigo-100">
+                    <span className="font-mono text-gray-500 flex-shrink-0">{it[0]}</span>
+                    <span className="font-medium text-gray-800 flex-1 truncate text-left">{it[1]}{it[2]?` ${it[2]}`:''}</span>
+                    {it[3] ? <span className="text-xs text-gray-400 flex-shrink-0">{it[3]}</span>
+                           : <span className="text-xs text-gray-300 flex-shrink-0">生年月日なし</span>}
+                    {regNos.has(normChartNo(it[0])) &&
+                      <span className="text-[10px] font-medium text-green-700 bg-green-100 rounded px-1.5 py-0.5 flex-shrink-0">登録済み</span>}
+                  </TapButton>
+                ))}
+              </div>
+            )}
+            {dictPicked && <p className="text-xs text-amber-700 font-medium mt-1.5">📖 辞書から入力しました — フリガナを入力し、性別・内容を確認してから保存してください。</p>}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">氏名 *</label>
