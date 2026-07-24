@@ -685,7 +685,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '54';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '55';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1817,7 +1817,7 @@ function TapButton({onClick, className, children, disabled, title}) {
 }
 function NavBtns({onBack,onNext,nextLabel}) {
   return (
-    <div className="flex gap-3 pt-2">
+    <div className="flex gap-3 pt-2" data-ro-ok="1">
       <Btn onClick={onBack} variant="secondary"><span>◀</span> 戻る</Btn>
       <Btn onClick={onNext} cls="flex-1">{nextLabel}</Btn>
     </div>
@@ -1957,7 +1957,8 @@ function PatientSelect({onSelect,selected,flowPage}) {
               className={`px-3 py-1.5 rounded-lg text-xs font-medium ${showAll?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>すべて表示</TapButton>
           </div>
         </div>
-        <div className="space-y-2 max-h-96 overflow-y-auto">
+        {/* 一覧は高さ制限なし＝ページ全体のスクロールに任せる（v55: max-h-96だと5名分しか見えず見逃しの原因になった） */}
+        <div className="space-y-2">
           {sorted.length===0 && (
             <p className="text-sm text-gray-400 text-center py-6">
               {patients.length===0 ? '患者がまだいません。「＋新規患者」から登録してください。'
@@ -1980,10 +1981,8 @@ function PatientSelect({onSelect,selected,flowPage}) {
                   <span className="text-xs text-gray-500 ml-2">{age.label}</span>
                   {lastAt && <span className="block text-xs text-gray-400 mt-0.5">前回 {formatDate(lastAt)}</span>}
                 </div>
-                {/* 行内アクション（左：記録一覧 / 編集 / 削除）。行タップ=選択と二重発火しないよう stopPropagation */}
+                {/* 行内アクション（編集 / 削除）。行タップ=記録一覧へ（v55で記録一覧ボタンは廃止・行タップに統合） */}
                 <div className="flex items-center gap-1 flex-shrink-0">
-                  <button onClick={e=>{e.stopPropagation();nav({p:'history',patientId:p.id,returnTo:flowPage});}}
-                    className="text-sm font-medium text-gray-600 hover:text-blue-600 px-2.5 py-2 rounded-lg hover:bg-white">記録一覧</button>
                   <button onClick={e=>{e.stopPropagation();nav({p:'patientForm',patientId:p.id,returnTo:flowPage});}}
                     className="p-2 text-gray-500 hover:text-green-600 hover:bg-white rounded-lg text-lg" title="編集">⚙️</button>
                   <button onClick={e=>{e.stopPropagation();setDel(p.id);}}
@@ -2846,15 +2845,31 @@ function StaffSelectModal({docList, hygList, doc, setDoc, hyg, setHyg, date, set
   );
 }
 // 入力途中の「トップに戻る」警告モーダル
-function UnsavedBackModal({onLeave, onStay}) {
+function UnsavedBackModal({onLeave, onStay, onSaveLeave}) {
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={onStay}>
       <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
         <h3 className="font-bold text-gray-900 mb-2">入力途中です</h3>
-        <p className="text-sm text-gray-500 mb-6">今入力したデータはまだ保存されていません。</p>
+        <p className="text-sm text-gray-500 mb-6">今入力したデータはまだ保存されていません。一時保存すると、記録一覧からこの記録を開いて続きを入力できます。</p>
+        <div className="flex flex-col gap-2.5">
+          {onSaveLeave && <Btn onClick={onSaveLeave} cls="w-full">💾 一時保存して戻る</Btn>}
+          <Btn onClick={onLeave} variant="danger" cls="w-full">保存せずに戻る</Btn>
+          <Btn onClick={onStay} variant="gray" cls="w-full">入力を続ける</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+// 閲覧モードで項目に触れたときの変更確認（v55）。「変更する」でその場で編集モードに切替
+function EditConfirmModal({onEdit, onCancel}) {
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={onCancel}>
+      <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
+        <h3 className="font-bold text-gray-900 mb-2">※過去の検査データです</h3>
+        <p className="text-sm text-gray-500 mb-6">本当に変更しますか？「変更する」を選ぶと編集できるようになります（保存するまでデータは書き換わりません）。</p>
         <div className="flex gap-3">
-          <Btn onClick={onLeave} variant="danger" cls="flex-1">保存せずに戻る</Btn>
-          <Btn onClick={onStay} cls="flex-1">入力を続ける</Btn>
+          <Btn onClick={onCancel} variant="gray" cls="flex-1">変更しない</Btn>
+          <Btn onClick={onEdit} variant="danger" cls="flex-1">✏️ 変更する</Btn>
         </div>
       </div>
     </div>
@@ -2934,11 +2949,14 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const nav = useNav();
   const showToast = useToast();
   const {patients, assessments, addAssessment, updateAssessment, clinic, getAssessment} = useS();
-  const ro = mode==='view'; // 閲覧モード（読み取り専用）
+  const [ro, setRo] = useState(mode==='view'); // 閲覧モード（読み取り専用）。「変更する」でその場で編集モードへ（v55）
+  const [askEdit, setAskEdit] = useState(false); // 閲覧中に項目へ触れた→変更確認ポップ
   // 過去評価の読み込み：assessmentId があれば該当評価を取得して全stateを復元する
   const loaded = assessmentId ? getAssessment(assessmentId) : null;
   const isLoaded = !!loaded; // 過去評価を開いている（新規ではない）
   const [step, setStep] = useState((initPid||isLoaded)?'questionnaire':'select');
+  // v55: 記録一覧の「新規評価を開始」から来た場合（initPidあり・読込なし）は担当者選択を自動で開く
+  useEffect(()=>{ if(initPid && !isLoaded) setShowStaff(true); },[]);
   const [pid, setPid] = useState(loaded?loaded.patientId:(initPid||''));
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
   const [checkedC, setCheckedC] = useState(loaded?(loaded.checkedCItems||[]):[]);
@@ -3138,11 +3156,14 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
         </div>
       </header>
       {/* 閲覧モードのバナー（常時表示） */}
-      {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更できません）</div>}
+      {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更するには項目をタップ）</div>}
       {step!=='select' && <StepBar steps={PED_STEPS} current={step} onJump={k=>setStep(k)}/>}
-      <div className="flex-1 overflow-y-auto">
+      {/* v55: 閲覧モード中は項目タップを捕捉して変更確認ポップを出す（data-ro-ok の付いたナビ系は素通し） */}
+      <div className="flex-1 overflow-y-auto"
+        onClickCapture={e=>{ if(!ro) return; if(e.target.closest && e.target.closest('[data-ro-ok]')) return; e.preventDefault(); e.stopPropagation(); setAskEdit(true); }}>
 
-        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('questionnaire');setShowStaff(true);}} selected={pid} flowPage="pediatric"/>}
+        {/* v55: 患者タップ＝記録一覧へ。新規検査は記録一覧の「➕ 新規評価を開始」から */}
+        {step==='select' && <PatientSelect onSelect={id=>nav({p:'history',patientId:id,returnTo:'pediatric'})} selected={pid} flowPage="pediatric"/>}
 
         {step==='questionnaire' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
@@ -3235,7 +3256,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
                             <label className="text-sm font-medium text-gray-700">📷 顔貌写真（最大4枚）</label>
                             <p className="text-xs text-gray-400 mb-2">例：安静時のお口ぽかん。画面表示のみで印刷物には載りません</p>
-                            <PhotoAttach photos={photos} onAdd={addPhoto} onRemove={removePhoto} ro={ro}/>
+                            <div data-ro-ok="1"><PhotoAttach photos={photos} onAdd={addPhoto} onRemove={removePhoto} ro={ro}/></div>
                           </div>
                         )}
                       </React.Fragment>
@@ -3350,7 +3371,10 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
         <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
       )}
       {/* 入力途中の戻る警告 */}
-      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}/>}
+      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}
+        onSaveLeave={()=>{doSave(); showToast('一時保存しました'); nav({p:'home'});}}/>}
+      {/* 閲覧モード中に項目へ触れた→変更確認（v55） */}
+      {askEdit && <EditConfirmModal onEdit={()=>{setRo(false);setAskEdit(false);}} onCancel={()=>setAskEdit(false)}/>}
       {/* 別紙1/2 切替の確認（チェック済みがある場合のみ） */}
       {phaseSwitch && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={()=>setPhaseSwitch(null)}>
@@ -3502,13 +3526,16 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const nav = useNav();
   const showToast = useToast();
   const {patients, assessments, addAssessment, updateAssessment, clinic, getAssessment} = useS();
-  const ro = mode==='view'; // 閲覧モード（読み取り専用）
+  const [ro, setRo] = useState(mode==='view'); // 閲覧モード（読み取り専用）。「変更する」でその場で編集モードへ（v55）
+  const [askEdit, setAskEdit] = useState(false); // 閲覧中に項目へ触れた→変更確認ポップ
   // 過去評価の読み込み：assessmentId があれば該当評価を取得して全stateを復元する
   const loaded = assessmentId ? getAssessment(assessmentId) : null;
   const isLoaded = !!loaded;
   // 読込時の measurements を復元（EMPTY_M をベースに上書き）
   const loadedM = loaded ? {...EMPTY_M, ...(loaded.measurements||{})} : null;
   const [step,setStep] = useState((initPid||isLoaded)?'litems':'select');
+  // v55: 記録一覧の「新規評価を開始」から来た場合（initPidあり・読込なし）は担当者選択を自動で開く
+  useEffect(()=>{ if(initPid && !isLoaded) setShowStaff(true); },[]);
   const [pid,setPid] = useState(loaded?loaded.patientId:(initPid||''));
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
   const [m,setM] = useState(loadedM||{...EMPTY_M});
@@ -3618,11 +3645,14 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
         </div>
       </header>
       {/* 閲覧モードのバナー（常時表示） */}
-      {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更できません）</div>}
+      {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更するには項目をタップ）</div>}
       {step!=='select' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)}/>}
-      <div className="flex-1 overflow-y-auto">
+      {/* v55: 閲覧モード中は項目タップを捕捉して変更確認ポップを出す（data-ro-ok の付いたナビ系は素通し） */}
+      <div className="flex-1 overflow-y-auto"
+        onClickCapture={e=>{ if(!ro) return; if(e.target.closest && e.target.closest('[data-ro-ok]')) return; e.preventDefault(); e.stopPropagation(); setAskEdit(true); }}>
 
-        {step==='select' && <PatientSelect onSelect={id=>{setPid(id);setStep('litems');setShowStaff(true);}} selected={pid} flowPage="adult"/>}
+        {/* v55: 患者タップ＝記録一覧へ。新規検査は記録一覧の「➕ 新規評価を開始」から */}
+        {step==='select' && <PatientSelect onSelect={id=>nav({p:'history',patientId:id,returnTo:'adult'})} selected={pid} flowPage="adult"/>}
 
         {step==='litems' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
@@ -3790,7 +3820,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                 className={`w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none ${ro?'opacity-60 bg-gray-100':''}`}/>
               {!ro && <NoteTemplates kind="adult" notes={notes} setNotes={setNotes}/>}
             </div>
-            <div className="flex gap-3">
+            <div className="flex gap-3" data-ro-ok="1">
               <Btn onClick={()=>setStep('litems')} variant="secondary"><span>◀</span> 戻る</Btn>
               {/* 閲覧モードは保存せず印刷プレビューへ */}
               <Btn onClick={()=>{ if(ro){ nav({p:'print',assessmentId:savedId}); } else { const id=doSave(); showToast('保存しました'); nav({p:'print',assessmentId:id}); } }} cls="flex-1">🖨️ 印刷プレビューへ →</Btn>
@@ -3803,7 +3833,10 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
         <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
       )}
       {/* 入力途中の戻る警告 */}
-      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}/>}
+      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)}
+        onSaveLeave={()=>{doSave(); showToast('一時保存しました'); nav({p:'home'});}}/>}
+      {/* 閲覧モード中に項目へ触れた→変更確認（v55） */}
+      {askEdit && <EditConfirmModal onEdit={()=>{setRo(false);setAskEdit(false);}} onCancel={()=>setAskEdit(false)}/>}
     </div>
   );
 }
@@ -3816,10 +3849,9 @@ function History({patientId, returnTo}) {
   const {getPatient, getPatientAssessments, deleteAssessment} = useS();
   const patient = getPatient(patientId);
   const assessments = getPatientAssessments(patientId);
-  const [openTarget, setOpenTarget] = useState(null); // 「開く」3択モーダルの対象評価
-  // 過去評価を閲覧/変更モードで開く
+  const [delA, setDelA] = useState(null); // 削除確認モーダルの対象評価
+  // 過去評価を閲覧/変更モードで開く（v55: カードタップで閲覧モード直行。変更はフロー内の確認ポップ経由）
   const openAssessment = (a, mode) => {
-    setOpenTarget(null);
     nav({p:a.type==='pediatric'?'pediatric':'adult', patientId:a.patientId, assessmentId:a.id, mode});
   };
   if(!patient) return <div className="flex items-center justify-center min-h-screen text-gray-500">患者が見つかりません</div>;
@@ -3852,7 +3884,8 @@ function History({patientId, returnTo}) {
         {assessments.map(a=>{
           const isPed=a.type==='pediatric';
           return (
-            <div key={a.id} className="bg-white rounded-2xl shadow-sm p-5">
+            <div key={a.id} onClick={()=>openAssessment(a,'view')}
+              className="bg-white rounded-2xl shadow-sm p-5 cursor-pointer hover:ring-2 hover:ring-blue-200 transition-shadow">
               <div className="flex items-start justify-between">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
@@ -3872,25 +3905,23 @@ function History({patientId, returnTo}) {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={()=>setOpenTarget(a)} className="p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="開く">📂</button>
-                  <button onClick={()=>nav({p:'print',assessmentId:a.id})} className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg" title="印刷">🖨️</button>
-                  <button onClick={()=>deleteAssessment(a.id)} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="削除">🗑️</button>
+                  <button onClick={e=>{e.stopPropagation();nav({p:'print',assessmentId:a.id});}} className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg" title="印刷">🖨️</button>
+                  <button onClick={e=>{e.stopPropagation();setDelA(a);}} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="削除">🗑️</button>
                 </div>
               </div>
             </div>
           );
         })}
       </div>
-      {/* 過去評価を開く：3択モーダル（閲覧 / 変更 / キャンセル） */}
-      {openTarget && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={()=>setOpenTarget(null)}>
+      {/* 記録の削除確認モーダル（v55: ゴミ箱の即削除をやめ、必ず確認を挟む） */}
+      {delA && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6" onClick={()=>setDelA(null)}>
           <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={e=>e.stopPropagation()}>
-            <h3 className="font-bold text-gray-900 mb-2">※過去の検査データです</h3>
-            <p className="text-sm text-gray-500 mb-6">誤って変更しないようご注意ください。どのように開きますか？</p>
-            <div className="flex flex-col gap-2.5">
-              <Btn onClick={()=>openAssessment(openTarget,'view')} cls="w-full">👁 閲覧する（見るだけ）</Btn>
-              <Btn onClick={()=>openAssessment(openTarget,'edit')} variant="secondary" cls="w-full">✏️ 変更する</Btn>
-              <Btn onClick={()=>setOpenTarget(null)} variant="gray" cls="w-full">変更しない（キャンセル）</Btn>
+            <h3 className="font-bold text-gray-900 mb-2">この記録を本当に削除しますか？</h3>
+            <p className="text-sm text-gray-500 mb-6">{formatDate(delA.date)} の{delA.type==='pediatric'?'発達不全症':'低下症'}の評価記録を削除します。この操作は取り消せません。</p>
+            <div className="flex gap-3">
+              <Btn onClick={()=>setDelA(null)} variant="gray" cls="flex-1">キャンセル</Btn>
+              <Btn onClick={()=>{deleteAssessment(delA.id);setDelA(null);}} variant="danger" cls="flex-1">削除する</Btn>
             </div>
           </div>
         </div>
@@ -4238,7 +4269,8 @@ function PrintAdult({a, patientName, tongueCut, prev}) {
             <p style={{fontSize:'10px',color:'#888',marginTop:'2px'}}>気になる項目に対応したトレーニングです。毎日少しずつ続けましょう。</p>
             <div style={{height:'2px',background:'#1d4ed8',margin:'6px 64px 0'}}/>
           </div>
-          <div style={{columnCount:2, columnGap:'8px'}}>
+          {/* v55: CSS多段組(columnCount)はカラムの高さが不揃いでページ収まりが悪いため、行で揃う2列グリッドに変更 */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',columnGap:'8px',alignItems:'start'}}>
             {trainings.map(t=><TrainCardPrint key={t.letter} t={t}/>)}
           </div>
           <p style={{fontSize:'9px',color:'#aaa',marginTop:'6px'}}>参考：口腔機能向上のための実地指導内容</p>
