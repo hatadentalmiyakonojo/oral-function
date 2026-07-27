@@ -471,6 +471,15 @@ function toWareki(y){
   for(const e of ERAS){ if(y>=e.start) return {era:e.name, ey:y-e.start+1}; }
   return {era:'大正', ey:1};
 }
+// 数値配列（文字列可・空欄は無視）の中央値を小数1桁の文字列で返す。空なら''
+//   ムーカス（口腔湿潤度）用：センサーの圧接角度で生じるはずれ値を除くため連続3回測定の中央値を測定値とする
+function medianOf(arr){
+  const nums=(arr||[]).map(parseFloat).filter(x=>!isNaN(x)).sort((a,b)=>a-b);
+  if(!nums.length) return '';
+  const mid=Math.floor(nums.length/2);
+  const med = nums.length%2 ? nums[mid] : (nums[mid-1]+nums[mid])/2;
+  return (Math.round(med*10)/10).toFixed(1);
+}
 // 姓名を空白（全角/半角）で分割。空白が無ければ全部を姓に
 function splitName(s){
   const t=(s||'').trim().replace(/　/g,' ');
@@ -685,7 +694,7 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '55';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '56';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -3395,19 +3404,27 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
 // ═══════════════════════════════════════════════
 // MODULE-LEVEL: MeasInput (moved outside component to avoid remount bug)
 // ═══════════════════════════════════════════════
-function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled}) {
+//   free=true でプルダウンでなくキーボード自由入力（咬合圧など細かい実測値を入れる項目用・v56）
+function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled,free,placeholder}) {
   const opts = MEAS_OPTS[specKey||mkey] || [];
   const val = m[mkey]||''; const num = parseFloat(val);
   const abn = val!=='' && !isNaN(num) && (dir==='lt' ? num<thr : num>=thr);
+  const cls = `w-full border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abn?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`;
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       <div className="flex items-center gap-1.5">
-        <select value={val} onChange={e=>setM(mkey,e.target.value)} disabled={disabled}
-          className={`w-full border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abn?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}>
-          <option value="">—</option>
-          {opts.map(o=><option key={o} value={o}>{o}</option>)}
-        </select>
+        {free ? (
+          // 数字キーボードで直接入力（数字・小数点のみ許可。空欄は未検査）
+          <input type="text" inputMode="decimal" value={val} placeholder={placeholder||'数値を入力'} disabled={disabled}
+            onChange={e=>{ const v=e.target.value.replace(/[^0-9.]/g,''); setM(mkey, v); }}
+            className={cls}/>
+        ) : (
+          <select value={val} onChange={e=>setM(mkey,e.target.value)} disabled={disabled} className={cls}>
+            <option value="">—</option>
+            {opts.map(o=><option key={o} value={o}>{o}</option>)}
+          </select>
+        )}
         {unit && <span className="text-xs text-gray-500 flex-shrink-0">{unit}</span>}
       </div>
       {abn && <p className="text-xs text-red-500 mt-0.5">基準値以下</p>}
@@ -3493,7 +3510,7 @@ const EAT10_QUESTIONS = [
   '飲み込むことはストレスが多い',
 ];
 // 成人の各検査の初期値。TCIは舌マップ・EAT-10は質問票から自動計算。当院で通常検査しない項目（細菌数・サクソン・グルコース）は空欄＝未検査スタート
-const EMPTY_M = {tciScore:'50',tciZones:[1,1,1,1,1,1,1,1,1],bacteriaLevel:'',oralMoisture:MEAS_DEF.oralMoisture,saxonTest:'',biteForce:MEAS_DEF.biteForce,remainingTeeth:MEAS_DEF.remainingTeeth,biteFilter:true,ddk_pa:MEAS_DEF.ddk_pa,ddk_ta:MEAS_DEF.ddk_ta,ddk_ka:MEAS_DEF.ddk_ka,tonguePres3:[MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure],maxTonguePressure:MEAS_DEF.maxTonguePressure,masticationScore:'',eatScore:'',eatAnswers:Array(10).fill(null),rsst:''};
+const EMPTY_M = {tciScore:'50',tciZones:[1,1,1,1,1,1,1,1,1],bacteriaLevel:'',moist3:[MEAS_DEF.oralMoisture,MEAS_DEF.oralMoisture,MEAS_DEF.oralMoisture],oralMoisture:MEAS_DEF.oralMoisture,saxonTest:'',biteForce:MEAS_DEF.biteForce,remainingTeeth:MEAS_DEF.remainingTeeth,biteFilter:true,ddk_pa:MEAS_DEF.ddk_pa,ddk_ta:MEAS_DEF.ddk_ta,ddk_ka:MEAS_DEF.ddk_ka,tonguePres3:[MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure,MEAS_DEF.maxTonguePressure],maxTonguePressure:MEAS_DEF.maxTonguePressure,masticationScore:'',eatScore:'',eatAnswers:Array(10).fill(null),rsst:''};
 
 // EAT-10 質問票：各質問を0〜4でタップ。合計を自動計算し3点以上で嚥下機能低下の疑い
 function EAT10({answers, onChange, disabled}) {
@@ -3532,7 +3549,15 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const loaded = assessmentId ? getAssessment(assessmentId) : null;
   const isLoaded = !!loaded;
   // 読込時の measurements を復元（EMPTY_M をベースに上書き）
-  const loadedM = loaded ? {...EMPTY_M, ...(loaded.measurements||{})} : null;
+  //   v56: 3回測定が無い旧データは、保存済みの測定値を1回目に入れ残りは空にする
+  //   （EMPTY_Mの既定値が3回欄に残って「測定値と3回欄が食い違う」のを防ぐ。小児のlip3と同じ復元方式）
+  const loadedM = loaded ? (()=>{
+    const lm = loaded.measurements||{};
+    const base = {...EMPTY_M, ...lm};
+    if(!Array.isArray(lm.moist3))      base.moist3      = [lm.oralMoisture||'', '', ''];
+    if(!Array.isArray(lm.tonguePres3)) base.tonguePres3 = [lm.maxTonguePressure||'', '', ''];
+    return base;
+  })() : null;
   const [step,setStep] = useState((initPid||isLoaded)?'litems':'select');
   // v55: 記録一覧の「新規評価を開始」から来た場合（initPidあり・読込なし）は担当者選択を自動で開く
   useEffect(()=>{ if(initPid && !isLoaded) setShowStaff(true); },[]);
@@ -3583,10 +3608,14 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     if(!pid || !prevA || savedId || isLoaded) return;
     const pm = prevA.measurements||{};
     const merged = {...EMPTY_M, ...pm};
-    // 旧データ（3回測定なし）から再評価する場合は、前回の平均値を3回分にプリセット
+    // 旧データ（3回測定なし）から再評価する場合は、前回の測定値を3回分にプリセット
     if(!Array.isArray(pm.tonguePres3) && pm.maxTonguePressure!=null && pm.maxTonguePressure!==''){
       const snap = snapToSpec('maxTonguePressure', parseFloat(pm.maxTonguePressure));
       merged.tonguePres3 = [snap, snap, snap];
+    }
+    if(!Array.isArray(pm.moist3) && pm.oralMoisture!=null && pm.oralMoisture!==''){
+      const snap = snapToSpec('oralMoisture', parseFloat(pm.oralMoisture));
+      merged.moist3 = [snap, snap, snap];
     }
     setM(merged);
   },[pid]);
@@ -3607,6 +3636,12 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     const nums=arr.map(parseFloat).filter(x=>!isNaN(x));
     const avg=nums.length?(Math.round(nums.reduce((a,b)=>a+b,0)/nums.length*10)/10).toFixed(1):'';
     return {...p, tonguePres3:arr, maxTonguePressure:avg};
+  }); };
+  // 口腔湿潤度（ムーカス）：連続3回測定し、その中央値を測定値とする（v56）
+  //   センサーの圧接角度で生じるはずれ値を除外するため平均でなく中央値を採用
+  const setMoist3 = (i,v) => { if(ro) return; setM(p=>{
+    const arr=[...(p.moist3||['','',''])]; arr[i]=v;
+    return {...p, moist3:arr, oralMoisture: medianOf(arr)};
   }); };
   // 舌マップ（9分割）からTCI%を自動計算。null=未検査
   const setTciZones = z => { if(ro) return; setM(p=>({...p, tciZones:z, tciScore: z ? String(Math.round(z.reduce((a,b)=>a+b,0)/18*100)) : ''})); };
@@ -3688,10 +3723,17 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                             </MoreBox>
                           </div>}
                           {item.id==='L-2' && <div className="ml-7 space-y-2">
+                            <p className="text-xs text-gray-500">口腔湿潤度（ムーカス・3回測定／基準27未満で口腔乾燥）{prevA&&prevA.measurements&&prevA.measurements.oralMoisture?`／前回 ${prevA.measurements.oralMoisture}`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 連続3回測定し、その<strong>中央値</strong>を測定値とします（センサーの圧接角度で生じるはずれ値を除くため）。舌背中央部で一定圧・2秒</p>
                             <TestIntervalWarn warn={warnMoist}/>
-                            <div className="grid grid-cols-2 gap-3">
-                              <MeasInput label="口腔湿潤度（ムーカス）" unit="" mkey="oralMoisture" thr={27} m={m} setM={setMv} disabled={ro}/>
-                              <div/>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="" specKey="oralMoisture" value={(m.moist3||['','',''])[i]} onChange={v=>setMoist3(i,v)} disabled={ro}/>
+                              ))}
+                            </div>
+                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${m.oralMoisture===''?'bg-gray-50 text-gray-500':parseFloat(m.oralMoisture)<27?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                              中央値（測定値）：<span className="font-bold text-base">{m.oralMoisture!==''?m.oralMoisture:'—'}</span>{(()=>{const n=(m.moist3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}
+                              {m.oralMoisture!=='' && parseFloat(m.oralMoisture)<27 && <span className="ml-2 text-xs">⚠ 基準未満（＜27）→ 口腔乾燥</span>}
                             </div>
                             <MoreBox label="サクソンテストを入力（当院では通常検査しません）" forceOpen={m.saxonTest!==''}>
                               <div className="w-44"><MeasInput label="サクソンテスト" unit="g/2min" mkey="saxonTest" thr={2} m={m} setM={setMv} disabled={ro}/></div>
@@ -3707,7 +3749,8 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                             </div>
                             <TestIntervalWarn warn={warnBite}/>
                             <div className="grid grid-cols-2 gap-3">
-                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv} disabled={ro}/>
+                              {/* 咬合圧はプルダウンでなく数字キーボードで実測値を直接入力（v56） */}
+                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv} disabled={ro} free placeholder="例）450.5"/>
                               <MeasInput label="残存歯数" unit="本" mkey="remainingTeeth" thr={20} m={m} setM={setMv} disabled={ro}/>
                             </div>
                           </div>}
