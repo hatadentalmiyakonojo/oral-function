@@ -710,8 +710,8 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '59';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
-const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
+const APP_VERSION = '60';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
 //   ※splitName/EMPTY_M等の「項目の有無で旧データを吸収する」既存処理はそのまま残す。ここは構造変更専用。
@@ -733,6 +733,11 @@ const migrations = [
   },
 ];
 // 起動時に一度だけ実行（Reactのrender前）。冪等。失敗時は印を付けず次回起動で再試行。
+// (v2→v3) v57〜v59で保存した記録には、触っていない項目の初期値（咬合力600等）が残っている。
+//         touched を持つ記録だけ、未検査の項目を空欄にする。旧データ（touched無し）は触らない。冪等。
+migrations.push((load, save) => {
+  save('assessments', blankUntouchedAssessments(load('assessments', [])));
+});
 function runMigrations(){
   let from = load('dataSchemaVersion', LEGACY_SCHEMA_VERSION);
   if(typeof from !== 'number' || from < 0) from = LEGACY_SCHEMA_VERSION; // 壊れたマーカー対策
@@ -1765,16 +1770,24 @@ function measuredOnly(a){
     if(!Array.isArray(m.touched)) return a;
     const mm = {...m};
     for(const k of ADULT_MEAS_KEYS) if(!isMeasured(m,k)) mm[k]='';
+    // 測定値と対になる入力欄（3回測定・舌マップ）も空に。画面で初期値だけ残して保存はしない（v60）
+    if(!isMeasured(m,'oralMoisture'))      mm.moist3      = ['','',''];
+    if(!isMeasured(m,'maxTonguePressure')) mm.tonguePres3 = ['','',''];
+    if(!isMeasured(m,'tciScore'))          mm.tciZones    = null;
     return {...a, measurements:mm};
   }
   if(a.type==='pediatric'){
     if(!Array.isArray(a.touched)) return a;
     const b = {...a};
     for(const k of PED_MEAS_KEYS) if(!isMeasured(a,k)) b[k]='';
+    if(!isMeasured(a,'lipClosureForce'))   b.lipForces3  = ['','',''];
+    if(!isMeasured(a,'maxTonguePressure')) b.tonguePres3 = ['','',''];
     return b;
   }
   return a;
 }
+// 保存済み評価の一覧に measuredOnly を適用（v60の移行と同じ処理。touched を持たない旧データは素通し・冪等）
+function blankUntouchedAssessments(list){ return (list||[]).map(a => measuredOnly(a)); }
 function computeMeasurementLItems(m, tongueCutoff) {
   const tCut = tongueCutoff || 30; // 成人舌圧cut-off（年齢性別。未指定時は公式30kPa）
   const c = [];
@@ -3203,11 +3216,12 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
     const keepDate = (isLoaded && loaded) ? loaded.date : ymdToIso(examDate);
     // 評価オブジェクトにはメタのみ保存（dataURLはIndexedDBへ）。missingタイルも参照として残す。
     const photoMeta = photos.map(p=>({id:p.id, date:p.date, size:p.size}));
-    const a = {id:savedId||generateId(),patientId:pid,date:keepDate,type:'pediatric',
+    // v60: 触っていない項目は空欄で保存（画面の初期値は入力を速くするための表示だけ）
+    const a = measuredOnly({id:savedId||generateId(),patientId:pid,date:keepDate,type:'pediatric',
       phase:isPreWeaning?'pre':'post',
       checkedCItems:checkedC,lipClosureForce:lipForce,lipForces3:lip3,maxTonguePressure:tonguePres,tonguePres3:tongue3,
       lipLow,tongueLow,height,weight,notes,scoring,diagnosis:{matchedPatterns:diagnosis},
-      staffDoctor,staffHygienist,photos:photoMeta,touched:Array.isArray(touched)?touched:undefined};
+      staffDoctor,staffHygienist,photos:photoMeta,touched:Array.isArray(touched)?touched:undefined});
     const okSave = savedId ? updateAssessment(a) : addAssessment(a);  // v57: 保存の成否
     if(!savedId && okSave) setSavedId(a.id);
     if(okSave) dirtyRef.current = false;   // 保存済み＝未保存の変更なし
@@ -3315,7 +3329,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                               ))}
                             </div>
                             <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipGrade&&lipGrade.key==='low'?'bg-red-50 text-red-700':lipGrade&&lipGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
-                              平均（測定値）：<span className="font-bold text-base">{lipForce!==''?lipForce:'—'}</span> N{lip3nums.length>0&&lip3nums.length<3?`（${lip3nums.length}回入力）`:''}{!lipMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">未検査（初期値のまま）</span>}
+                              平均（測定値）：<span className="font-bold text-base">{lipForce!==''?lipForce:'—'}</span> N{lip3nums.length>0&&lip3nums.length<3?`（${lip3nums.length}回入力）`:''}{!lipMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{lipForce===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
                               {lipGrade&&lipGrade.key==='low' && <span className="ml-2 text-xs">⚠ -1SD以下（≦{lipNorm.minus1sd}N）→ 口唇閉鎖力不足</span>}
                               {lipGrade&&lipGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{lipNorm.mean}Nより低め・-1SDは超えています）</span>}
                               {lipGrade&&lipGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{lipNorm.mean}N以上）</span>}
@@ -3334,7 +3348,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                               ))}
                             </div>
                             <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueGrade&&tongueGrade.key==='low'?'bg-red-50 text-red-700':tongueGrade&&tongueGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
-                              平均（測定値）：<span className="font-bold text-base">{tonguePres!==''?tonguePres:'—'}</span> kPa{tongue3nums.length>0&&tongue3nums.length<3?`（${tongue3nums.length}回入力）`:''}{!tongueMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">未検査（初期値のまま）</span>}
+                              平均（測定値）：<span className="font-bold text-base">{tonguePres!==''?tonguePres:'—'}</span> kPa{tongue3nums.length>0&&tongue3nums.length<3?`（${tongue3nums.length}回入力）`:''}{!tongueMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{tonguePres===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
                               {tongueGrade&&tongueGrade.key==='low' && <span className="ml-2 text-xs">⚠ cut-off値以下（≦{tongueNorm.cutoff}kPa）→ 低舌圧</span>}
                               {tongueGrade&&tongueGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{tongueNorm.mean}kPaより低め・cut-offは超えています）</span>}
                               {tongueGrade&&tongueGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{tongueNorm.mean}kPa以上）</span>}
@@ -3582,7 +3596,7 @@ function TCITongue({zones, onChange, disabled, measured}) {
         <p className="text-xs text-gray-500">付着スコア合計：<span className="font-bold text-gray-800">{sum}</span> / 18</p>
         <p className={`text-2xl font-bold ${(measured&&score!=null&&score>=50)?'text-red-600':'text-gray-800'}`}>TCI {score!=null?score:'—'}<span className="text-sm font-normal">%</span></p>
         <p className="text-xs text-gray-400">50%以上で L-1 該当</p>
-        {!measured && <p className="text-xs"><span className="font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">未検査（初期値のまま）</span></p>}
+        {!measured && <p className="text-xs"><span className="font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{zones?'未検査（初期値のまま・保存されません）':'未検査'}</span></p>}
         {measured && score!=null && score>=50 && <p className="text-xs text-red-500 font-medium">⚠ 基準値以上（≧50%）</p>}
         {zones && !disabled && <button onClick={()=>onChange(null)} className="text-xs text-gray-400 hover:text-red-500 underline">未検査に戻す</button>}
         <div className="text-[10px] text-gray-400 leading-relaxed pt-1">0=苔なし<br/>1=薄い舌苔<br/>2=厚い舌苔</div>
@@ -3716,7 +3730,15 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   useEffect(()=>{
     if(!pid || !prevA || savedId || isLoaded) return;
     const pm = prevA.measurements||{};
-    const merged = {...EMPTY_M, ...pm, touched:[]}; // v57: 前回の「検査済み」は引き継がない（今回はまだ未検査）
+    // v60: 前回が空欄（未検査）だった項目は初期値のまま。前回の実測値だけを引き継ぐ。touched は引き継がない
+    const merged = {...EMPTY_M, touched:[]};
+    for(const k in pm){
+      const v = pm[k];
+      if(k==='touched') continue;
+      if(v==null || v==='') continue;
+      if(Array.isArray(v) && v.every(x=>x==='' || x==null)) continue;
+      merged[k] = v;
+    }
     // 旧データ（3回測定なし）から再評価する場合は、前回の測定値を3回分にプリセット
     if(!Array.isArray(pm.tonguePres3) && pm.maxTonguePressure!=null && pm.maxTonguePressure!==''){
       const snap = snapToSpec('maxTonguePressure', parseFloat(pm.maxTonguePressure));
@@ -3766,8 +3788,9 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const doSave = () => {
     // 既存評価の更新時は元の日付を保持。新規作成時のみ現在日時をセット
     const keepDate = (isLoaded && loaded) ? loaded.date : ymdToIso(examDate);
-    const a={id:savedId||generateId(),patientId:pid,date:keepDate,type:'adult',
-      checkedLItems:allL,measurements:m,diagnosis:diag,notes,staffDoctor,staffHygienist};
+    // v60: 触っていない項目は空欄で保存（画面の初期値は入力を速くするための表示だけ）
+    const a=measuredOnly({id:savedId||generateId(),patientId:pid,date:keepDate,type:'adult',
+      checkedLItems:allL,measurements:m,diagnosis:diag,notes,staffDoctor,staffHygienist});
     const okSave = savedId?updateAssessment(a):addAssessment(a);  // v57: 保存の成否
     if(!savedId && okSave) setSavedId(a.id);
     if(okSave) dirtyRef.current = false;   // 保存済み＝未保存の変更なし
@@ -3801,7 +3824,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
 
         {step==='litems' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
-            <InfoBanner text="検査結果を入力すると、基準値を満たした項目が自動でチェックされます（● 付き）。視診等で追加する場合は項目名をタップしてください。"/>
+            <InfoBanner text="検査結果を入力すると、基準値を満たした項目が自動でチェックされます（● 付き）。視診等で追加する場合は項目名をタップしてください。触っていない項目は「未検査」として保存されます（画面の初期値は保存されません）。"/>
             {L_CATS.map(cat=>{
               const items=L_ITEMS.filter(l=>l.cat===cat);
               return (
@@ -3842,7 +3865,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                               ))}
                             </div>
                             <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.oralMoisture===''||!isMeasured(m,'oralMoisture'))?'bg-gray-50 text-gray-500':parseFloat(m.oralMoisture)<27?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
-                              中央値（測定値）：<span className="font-bold text-base">{m.oralMoisture!==''?m.oralMoisture:'—'}</span>{(()=>{const n=(m.moist3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'oralMoisture') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">未検査（初期値のまま）</span>}
+                              中央値（測定値）：<span className="font-bold text-base">{m.oralMoisture!==''?m.oralMoisture:'—'}</span>{(()=>{const n=(m.moist3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'oralMoisture') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{m.oralMoisture===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
                               {isMeasured(m,'oralMoisture') && parseFloat(m.oralMoisture)<27 && <span className="ml-2 text-xs">⚠ 基準未満（＜27）→ 口腔乾燥</span>}
                             </div>
                             <MoreBox label="サクソンテストを入力（当院では通常検査しません）" forceOpen={m.saxonTest!==''}>
@@ -3877,7 +3900,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                               ))}
                             </div>
                             <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.maxTonguePressure===''||!isMeasured(m,'maxTonguePressure'))?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
-                              平均（測定値）：<span className="font-bold text-base">{m.maxTonguePressure!==''?m.maxTonguePressure:'—'}</span> kPa{(()=>{const n=(m.tonguePres3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'maxTonguePressure') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">未検査（初期値のまま）</span>}
+                              平均（測定値）：<span className="font-bold text-base">{m.maxTonguePressure!==''?m.maxTonguePressure:'—'}</span> kPa{(()=>{const n=(m.tonguePres3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'maxTonguePressure') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{m.maxTonguePressure===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
                               {isMeasured(m,'maxTonguePressure') && parseFloat(m.maxTonguePressure)<tongueCut && <span className="ml-2 text-xs">⚠ 目安未満（＜{tongueCut}kPa）→ 低舌圧</span>}
                             </div>
                           </div>}
@@ -4872,6 +4895,21 @@ function runSelfTests(){
   const fs = computeFnScores(measuredOnly(aduUntouched), 30);
   t('レーダー: 触った湿潤度は measured', fs.find(x=>x.key==='L-2').measured, true);
   t('レーダー: 触っていない咬合力は unmeasured', fs.find(x=>x.key==='L-3').measured, false);
+  // --- v60: 保存時の空欄化（3回測定の欄・舌マップも空に／実測は残る／旧データは素通し／冪等） ---
+  const aduSave = {type:'adult', measurements:{...baseM, touched:['oralMoisture'], oralMoisture:'26', moist3:['26','26.5','25.5'], tonguePres3:['35.0','35.0','35.0'], tciZones:[1,1,1,1,1,1,1,1,1]}};
+  const sv = measuredOnly(aduSave).measurements;
+  t('空欄保存: 実測した湿潤度の3回欄は残る', sv.moist3, ['26','26.5','25.5']);
+  t('空欄保存: 触っていない舌圧の3回欄は空', sv.tonguePres3, ['','','']);
+  t('空欄保存: 触っていないTCIの舌マップは null', sv.tciZones, null);
+  const pedSave = {type:'pediatric', touched:['maxTonguePressure'], lipClosureForce:'8.4', lipForces3:['8.4','8.4','8.4'], maxTonguePressure:'18.2', tonguePres3:['18','19.5','17']};
+  const pv2 = measuredOnly(pedSave);
+  t('空欄保存(小児): 触っていない口唇は3回欄ごと空', [pv2.lipClosureForce, pv2.lipForces3], ['',['','','']]);
+  t('空欄保存(小児): 実測した舌圧は3回欄ごと残る', [pv2.maxTonguePressure, pv2.tonguePres3], ['18.2',['18','19.5','17']]);
+  const mig = blankUntouchedAssessments([aduSave, {type:'adult',measurements:{biteForce:'600'}}, null]);
+  t('移行v3: touched付き記録は空欄化される', mig[0].measurements.biteForce, '');
+  t('移行v3: 旧データ(touched無し)は変えない', mig[1].measurements.biteForce, '600');
+  t('移行v3: nullを壊さない', mig[2], null);
+  t('移行v3: 2回かけても同じ（冪等）', JSON.stringify(blankUntouchedAssessments(mig)), JSON.stringify(mig));
   return R;
 }
 function renderSelfTests(){
