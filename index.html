@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '63';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '64';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1938,6 +1938,12 @@ function NumInput({label,hint,unit,value,onChange,abnormal,abnormalText}) {
 // テンキー直接入力＋±ステッパー。blur/Enterで MEAS_SPEC にスナップ（snapToSpec 利用）
 //   free=true でプルダウンでなく数字キーボードの自由入力（舌圧・咬合圧など実測値を直接入れる項目・v58）
 //   measured=false（未検査＝初期値/前回値の表示だけ）のとき、free欄は空にして値を薄いヒントで見せる→タップしてすぐ打てる（v61）
+// テンキー（iPadのキーボード）で入力欄が隠れないよう、フォーカスした欄を画面中央へスクロール（v64）
+//   キーボード出現のアニメーション後に位置を決めるため少し待つ。失敗しても入力自体には影響しない
+function focusIntoView(e){
+  const el = e && e.target; if(!el) return;
+  setTimeout(()=>{ try{ el.scrollIntoView({block:'center', behavior:'smooth'}); }catch(_){} }, 320);
+}
 function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText,disabled,free,measured}) {
   const opts = MEAS_OPTS[specKey] || [];
   const spec = MEAS_SPEC[specKey];
@@ -1951,7 +1957,7 @@ function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText
       </div>
       <div className="flex items-center gap-2">
         {free ? (
-          <input type="text" inputMode="decimal" value={measured===false?'':(value||'')} placeholder={measured===false&&value?String(value):'数値を入力'} disabled={disabled}
+          <input type="text" inputMode="decimal" value={measured===false?'':(value||'')} placeholder={measured===false&&value?String(value):'数値を入力'} disabled={disabled} onFocus={focusIntoView}
             onChange={e=>onChange(e.target.value.replace(/[^0-9.]/g,''))}
             className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}/>
         ) : (
@@ -3332,7 +3338,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
       {step!=='select' && step!=='retest' && <StepBar steps={PED_STEPS} current={step} onJump={k=>setStep(k)} allJump={isLoaded}/>}
       </div>
       {/* v55: 閲覧モード中は項目タップを捕捉して変更確認ポップを出す（data-ro-ok の付いたナビ系は素通し） */}
-      <div className="flex-1 overflow-y-auto"
+      <div className="flex-1 overflow-y-auto" style={{paddingBottom:'45vh'}}
         onClickCapture={e=>{ if(!ro) return; if(e.target.closest && e.target.closest('[data-ro-ok]')) return; e.preventDefault(); e.stopPropagation(); setAskEdit(true); }}>
 
         {/* v55: 患者タップ＝記録一覧へ。新規検査は記録一覧の「➕ 新規評価を開始」から */}
@@ -3468,7 +3474,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
             <div className="bg-white rounded-2xl shadow-sm p-6">
               <h2 className="font-semibold text-gray-800 mb-3">📝 メモ・管理方針</h2>
               <p className="text-xs text-gray-400 mb-2">判定結果を踏まえた管理方針を記入（管理計画書に印字されます）</p>
-              <textarea value={notes} onChange={e=>setNotesRO(e.target.value)} disabled={ro} rows={3} placeholder="検査中の様子・管理方針など"
+              <textarea value={notes} onChange={e=>setNotesRO(e.target.value)} disabled={ro} rows={3} placeholder="検査中の様子・管理方針など" onFocus={focusIntoView}
                 className={`w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none ${ro?'opacity-60 bg-gray-100':''}`}/>
               {!ro && <NoteTemplates kind="pediatric" notes={notes} setNotes={setNotes}/>}
             </div>
@@ -3561,7 +3567,7 @@ function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled,free,pl
       <div className="flex items-center gap-1.5">
         {free ? (
           // 数字キーボードで直接入力（数字・小数点のみ許可。空欄は未検査）
-          <input type="text" inputMode="decimal" value={unmeasured?'':val} placeholder={unmeasured&&val?String(val):(placeholder||'数値を入力')} disabled={disabled}
+          <input type="text" inputMode="decimal" value={unmeasured?'':val} placeholder={unmeasured&&val?String(val):(placeholder||'数値を入力')} disabled={disabled} onFocus={focusIntoView}
             onChange={e=>{ const v=e.target.value.replace(/[^0-9.]/g,''); setM(mkey, v); }}
             className={cls}/>
         ) : (
@@ -3915,7 +3921,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       {step!=='select' && step!=='retest' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)} allJump={isLoaded}/>}
       </div>
       {/* v55: 閲覧モード中は項目タップを捕捉して変更確認ポップを出す（data-ro-ok の付いたナビ系は素通し） */}
-      <div className="flex-1 overflow-y-auto"
+      <div className="flex-1 overflow-y-auto" style={{paddingBottom:'45vh'}}
         onClickCapture={e=>{ if(!ro) return; if(e.target.closest && e.target.closest('[data-ro-ok]')) return; e.preventDefault(); e.stopPropagation(); setAskEdit(true); }}>
 
         {/* v55: 患者タップ＝記録一覧へ。新規検査は記録一覧の「➕ 新規評価を開始」から */}
@@ -4064,7 +4070,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
             <div className="bg-white rounded-2xl shadow-sm p-5">
               <h3 className="font-semibold text-gray-800 mb-2">📝 メモ・管理方針</h3>
               <p className="text-xs text-gray-400 mb-2">診断結果を踏まえた管理方針を記入（管理計画書に印字されます）</p>
-              <textarea value={notes} onChange={e=>setNotesRO(e.target.value)} disabled={ro} rows={3} placeholder="所見・管理方針など"
+              <textarea value={notes} onChange={e=>setNotesRO(e.target.value)} disabled={ro} rows={3} placeholder="所見・管理方針など" onFocus={focusIntoView}
                 className={`w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none ${ro?'opacity-60 bg-gray-100':''}`}/>
               {!ro && <NoteTemplates kind="adult" notes={notes} setNotes={setNotes}/>}
             </div>
