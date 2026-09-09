@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '58';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '59';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -764,7 +764,7 @@ function calMonthDiff(d1, d2){ const a=new Date(d1), b=new Date(d2);
 // 指定の検査値が入力されている直近の過去評価日（excludeId=今セッションの保存分を除外）
 function lastTestedDate(assessments, patientId, type, getter, excludeId){
   const hit = assessments.filter(x=>x.patientId===patientId && x.type===type && x.id!==excludeId)
-    .filter(x=>{const v=getter(x); return v!=null && v!=='';})
+    .filter(x=>{const v=getter(measuredOnly(x)); return v!=null && v!=='';})  // v59: 未検査は数えない
     .sort((x,y)=>new Date(y.date)-new Date(x.date))[0];
   return hit ? hit.date : null; }
 // 3か月ルール警告。前回から3暦月以上経過していればnull
@@ -1751,6 +1751,29 @@ function isMeasured(m, key){
   if(v==='' || v==null) return false;
   if(!Array.isArray(m.touched)) return true;
   return m.touched.indexOf(key) >= 0;
+}
+// 未検査（初期値のまま）の項目を空にした「実測だけの評価オブジェクト」を返す（v59）
+//   印刷物・レーダー・検査間隔警告・推移グラフなど「保存データを読む側」の入口で必ず通す。
+//   v57で判定と算定メモは未検査を除外したが、読む側は初期値を実測として扱ったままだった。
+//   保存データ自体は変えない（コピーを返す）。touched を持たない旧データはそのまま返す。
+const ADULT_MEAS_KEYS = ['tciScore','bacteriaLevel','oralMoisture','saxonTest','biteForce','remainingTeeth','ddk_pa','ddk_ta','ddk_ka','maxTonguePressure','masticationScore','eatScore','rsst'];
+const PED_MEAS_KEYS   = ['lipClosureForce','maxTonguePressure','height','weight'];
+function measuredOnly(a){
+  if(!a) return a;
+  if(a.type==='adult'){
+    const m = a.measurements||{};
+    if(!Array.isArray(m.touched)) return a;
+    const mm = {...m};
+    for(const k of ADULT_MEAS_KEYS) if(!isMeasured(m,k)) mm[k]='';
+    return {...a, measurements:mm};
+  }
+  if(a.type==='pediatric'){
+    if(!Array.isArray(a.touched)) return a;
+    const b = {...a};
+    for(const k of PED_MEAS_KEYS) if(!isMeasured(a,k)) b[k]='';
+    return b;
+  }
+  return a;
 }
 function computeMeasurementLItems(m, tongueCutoff) {
   const tCut = tongueCutoff || 30; // 成人舌圧cut-off（年齢性別。未指定時は公式30kPa）
@@ -3051,7 +3074,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const markPed = k => setTouched(p => Array.isArray(p) ? (p.indexOf(k)>=0?p:[...p,k]) : [k]);
   const measuredPed = (k, v) => (v!=='' && v!=null) && (!Array.isArray(touched) || touched.indexOf(k)>=0);
   // 入力内容が変わったら「未保存の変更あり」にする（初回マウントは除く）
-  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } dirtyRef.current=true; },
+  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } if(ro) return; dirtyRef.current=true; }, // v59: 閲覧中の読込は変更ではない
     [checkedC, lip3, tongue3, height, weight, notes, photos, staffDoctor, staffHygienist, examDate, phaseOverride]);
   const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
   // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
@@ -3663,7 +3686,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const dirtyRef = useRef(false);
   const firstRunRef = useRef(true);
   // 入力内容が変わったら「未保存の変更あり」にする（初回マウントは除く）
-  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } dirtyRef.current=true; },
+  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } if(ro) return; dirtyRef.current=true; }, // v59: 閲覧中の読込は変更ではない
     [m, manualL, notes, staffDoctor, staffHygienist, examDate]);
   const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
   // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
@@ -3987,7 +4010,7 @@ function History({patientId, returnTo}) {
   if(!patient) return <div className="flex items-center justify-center min-h-screen text-gray-500">患者が見つかりません</div>;
   const age = computeAge(patient.birth);
   // 検査値の推移グラフ用データ：同患者の評価を昇順に並べ、各系列の有効値が2件以上ある時のみ系列化
-  const asc=[...assessments].sort((a,b)=>new Date(a.date)-new Date(b.date));
+  const asc=[...assessments].map(measuredOnly).sort((a,b)=>new Date(a.date)-new Date(b.date)); // v59: 未検査の初期値は描かない
   const mk=(getter,cutFn)=>{ const pts=asc.map(a=>({date:a.date,value:parseFloat(getter(a))})).filter(p=>!isNaN(p.value));
     return pts.length>=2 ? {points:pts, cutoffs:cutFn?pts.map(p=>cutFn(p.date)):null} : null; };
   // 小児系列：舌圧（cut-off=年齢別）・口唇閉鎖力（cut-off=年齢性別の-1SD）
@@ -4170,15 +4193,15 @@ function PrintPreview({assessmentId}) {
   const [paper, setPaper] = useState('B5');           // 用紙サイズ A4/B5（既定B5）
   // 用紙ごとの印刷可能幅（用紙幅 − 左右余白10mm×2）。Safari等@page非対応環境でも実寸を担保
   const PAPER = {A4:{w:190, prev:680}, B5:{w:156, prev:560}};
-  const a = getAssessment(assessmentId);
+  const a = measuredOnly(getAssessment(assessmentId)); // v59: 未検査の初期値を印字しない
   const patient = a ? getPatient(a.patientId) : null;
   if(!a||!patient) return <div className="flex items-center justify-center min-h-screen text-gray-500">評価データが見つかりません</div>;
   const age = computeAge(patient.birth, a.date); // 印刷は評価日時点の年齢（過去記録・カウプ/ローレルも正しく）
   const isPed = a.type==='pediatric';
   // 前回の評価（同一患者・同一種別・今回より前の日付で最新）
-  const prevA = assessments
+  const prevA = measuredOnly(assessments
     .filter(x=>x.patientId===a.patientId && x.type===a.type && x.id!==a.id && new Date(x.date)<new Date(a.date))
-    .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
+    .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null);
   // 生年月日の和暦表示（管理計画書用）
   const [by,bm,bdd] = patient.birth.split('-').map(Number);
   const bw = toWareki(by);
@@ -4397,9 +4420,9 @@ function PrintAdult({a, patientName, tongueCut, prev}) {
               const declined = ps && !ps.weak && s.weak;   // 前回○ → 今回●
               return (
                 <div key={s.key} style={{display:'flex',alignItems:'center',gap:'7px',padding:'2.5px 0',borderBottom:'1px solid #f3f4f6'}}>
-                  <span style={{fontSize:'13px',color:s.weak?'#ef4444':'#22c55e',flexShrink:0}}>{s.weak?'●':'○'}</span>
+                  <span style={{fontSize:'13px',color:!s.measured&&!s.weak?'#9ca3af':s.weak?'#ef4444':'#22c55e',flexShrink:0}}>{!s.measured&&!s.weak?'－':s.weak?'●':'○'}</span>
                   <span style={{width:'72px',flexShrink:0,fontSize:'11px',fontWeight:'600',color:'#111'}}>{s.name}</span>
-                  <span style={{flex:1,fontSize:'10.5px',color:s.weak?'#dc2626':'#16a34a'}}>{s.weak?(p.bad||'弱め'):(p.good||'良好')}</span>
+                  <span style={{flex:1,fontSize:'10.5px',color:!s.measured&&!s.weak?'#6b7280':s.weak?'#dc2626':'#16a34a'}}>{!s.measured&&!s.weak?'今回は測っていません':s.weak?(p.bad||'弱め'):(p.good||'良好')}</span>
                   {improved && <span style={{fontSize:'9.5px',fontWeight:'700',color:'#d97706',background:'#fef3c7',borderRadius:'8px',padding:'1px 6px',flexShrink:0}}>改善！</span>}
                   {declined && <span style={{fontSize:'9.5px',fontWeight:'600',color:'#6b7280',background:'#f3f4f6',borderRadius:'8px',padding:'1px 6px',flexShrink:0}}>要ケア</span>}
                 </div>
@@ -4826,6 +4849,29 @@ function runSelfTests(){
   tOk('選択肢: 口唇閉鎖力は0〜30', MEAS_OPTS.lipForce[MEAS_OPTS.lipForce.length-1]==='30.0');
   tOk('選択肢に重複なし(舌圧)', new Set(MEAS_OPTS.maxTonguePressure).size===MEAS_OPTS.maxTonguePressure.length);
 
+  // --- v59: 未検査の初期値が「読む側」へ漏れない ---
+  const aduUntouched = {type:'adult', measurements:{...baseM, touched:['oralMoisture'], oralMoisture:'26'}};
+  const mo = measuredOnly(aduUntouched).measurements;
+  t('実測だけ: 触った湿潤度は残る', mo.oralMoisture, '26');
+  t('実測だけ: 触っていない咬合力は空になる', mo.biteForce, '');
+  t('実測だけ: 触っていない舌圧は空になる', mo.maxTonguePressure, '');
+  t('実測だけ: 元のデータは書き換えない', aduUntouched.measurements.biteForce, '600');
+  t('実測だけ: 旧データ(touched無し)はそのまま', measuredOnly({type:'adult',measurements:{biteForce:'600'}}).measurements.biteForce, '600');
+  const pedU = {type:'pediatric', touched:['lipClosureForce'], lipClosureForce:'3.1', maxTonguePressure:'25.4', height:'110', weight:'20'};
+  const po = measuredOnly(pedU);
+  t('実測だけ(小児): 触った口唇は残る', po.lipClosureForce, '3.1');
+  t('実測だけ(小児): 触っていない舌圧・身長は空', [po.maxTonguePressure, po.height], ['','']);
+  // 検査間隔: 触っていない初期値を「前回検査」と数えない
+  const hist = [
+    {id:'h1', patientId:'p', type:'adult', date:'2026-08-01', measurements:{...baseM, touched:[]}},                      // 初期値のみ＝未検査
+    {id:'h2', patientId:'p', type:'adult', date:'2026-06-01', measurements:{...baseM, touched:['maxTonguePressure']}},   // 舌圧だけ実測
+  ];
+  t('検査間隔: 未検査の記録は前回に数えない（舌圧の前回は6/1）', lastTestedDate(hist,'p','adult',x=>(x.measurements||{}).maxTonguePressure,null), '2026-06-01');
+  t('検査間隔: 一度も測っていない咬合力は前回なし', lastTestedDate(hist,'p','adult',x=>(x.measurements||{}).biteForce,null), null);
+  // 患者配布用レーダー: 未検査は measured=false（「良好」と書かない根拠）
+  const fs = computeFnScores(measuredOnly(aduUntouched), 30);
+  t('レーダー: 触った湿潤度は measured', fs.find(x=>x.key==='L-2').measured, true);
+  t('レーダー: 触っていない咬合力は unmeasured', fs.find(x=>x.key==='L-3').measured, false);
   return R;
 }
 function renderSelfTests(){
