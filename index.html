@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '61';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '62';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1979,18 +1979,22 @@ function Header({onBack,backLabel,title,sub}) {
     </header>
   );
 }
-function StepBar({steps,current,onJump}) {
+//   allJump=true（保存済みの記録を見返す・変更するとき）はどのステップへも移動できる（v62）。新規入力中は完了済みへ戻るだけ
+function StepBar({steps,current,onJump,allJump}) {
   const idx = steps.findIndex(s=>s.key===current);
   return (
     <div className="bg-white border-b border-gray-100 px-6 py-3 flex items-center gap-1">
       {steps.map((s,i) => {
-        const done = i<idx;                       // 完了済みステップのみ戻れる
-        const canJump = done && !!onJump;
+        const done = i<idx;
+        const canJump = (done || allJump) && !!onJump && i!==idx;
+        const cls = i===idx ? 'bg-blue-600 text-white ring-2 ring-blue-200'
+                  : canJump ? (done ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100')
+                  : 'bg-gray-100 text-gray-400';
         return (
         <React.Fragment key={s.key}>
           <button type="button" disabled={!canJump} onClick={()=>{ if(canJump) onJump(s.key); }}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${i<=idx?'bg-blue-600 text-white':'bg-gray-100 text-gray-400'} ${canJump?'hover:bg-blue-700 active:bg-blue-800 cursor-pointer':'cursor-default'}`}>
-            {i<idx?'✓':i+1} {s.label}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${cls} ${canJump?'active:bg-blue-800 cursor-pointer':'cursor-default'}`}>
+            {(i<idx||allJump)?'✓':i+1} {s.label}
           </button>
           {i<steps.length-1 && <div className="w-3 h-px bg-gray-300"/>}
         </React.Fragment>
@@ -3054,17 +3058,20 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   // 過去評価の読み込み：assessmentId があれば該当評価を取得して全stateを復元する
   const loaded = assessmentId ? getAssessment(assessmentId) : null;
   const isLoaded = !!loaded; // 過去評価を開いている（新規ではない）
-  const [step, setStep] = useState((initPid||isLoaded)?'questionnaire':'select');
+  // v62: 再検査モード（3か月ごとの再評価＝舌圧・りっぷるくんだけ入力）。前回の小児記録を引き継いで新しい記録を作る
+  const isRetest = mode==='retest' && !!initPid && !isLoaded;
+  const retestBase = isRetest ? (assessments.filter(x=>x.patientId===initPid && x.type==='pediatric').sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null) : null;
+  const [step, setStep] = useState((initPid||isLoaded) ? ((isRetest && retestBase) ? 'retest' : 'questionnaire') : 'select');
   // v55: 記録一覧の「新規評価を開始」から来た場合（initPidあり・読込なし）は担当者選択を自動で開く
   useEffect(()=>{ if(initPid && !isLoaded) setShowStaff(true); },[]);
   const [pid, setPid] = useState(loaded?loaded.patientId:(initPid||''));
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
-  const [checkedC, setCheckedC] = useState(loaded?(loaded.checkedCItems||[]):[]);
+  const [checkedC, setCheckedC] = useState(loaded?(loaded.checkedCItems||[]):(retestBase?(retestBase.checkedCItems||[]):[]));  // 再検査は前回のC項目を引き継ぐ
   const [lip3, setLip3] = useState(loaded?(loaded.lipForces3||[loaded.lipClosureForce||'','','']):['','','']); // りっぷるくん3回測定。平均が測定値
   const [tongue3, setTongue3] = useState(loaded?(loaded.tonguePres3||[loaded.maxTonguePressure||'','','']):['','','']); // JMS舌圧3回測定。平均が測定値
   const [height, setHeight] = useState(loaded?(loaded.height||''):'');
   const [weight, setWeight] = useState(loaded?(loaded.weight||''):'');
-  const [notes, setNotes] = useState(loaded?(loaded.notes||''):'');
+  const [notes, setNotes] = useState(loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
   const [savedId, setSavedId] = useState(assessmentId||null); // 読込時は savedId=評価ID → 保存は updateAssessment
   const [collapsed, setCollapsed] = useState(new Set());
   const [phaseOverride, setPhaseOverride] = useState(loaded?(loaded.phase==='pre'?'pre':'post'):null); // null=年齢で自動 / 'pre' / 'post'
@@ -3259,15 +3266,58 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
     else setStep(ord[Math.max(0,i-1)]);
   };
   // ヘッダ「トップに戻る」：入力途中（未保存・閲覧でない）なら警告、それ以外は即home
+  const leaveTo = () => nav(isLoaded ? {p:'history', patientId:pid, returnTo:'pediatric'} : {p:'home'}); // v62: 保存済み記録は記録一覧へ戻る
   const onBackHome = () => {
     if(step!=='select' && !ro && (!savedId || dirtyRef.current)){ setShowBackWarn(true); }
-    else nav({p:'home'});
+    else leaveTo();
   };
 
+  // りっぷるくん／舌圧の入力ブロック（問診ステップ・再検査画面で共用。v62）
+  const renderLipBlock = () => (
+                          <div className="px-5 pb-4 pt-1 bg-blue-50/30">
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-sm font-medium text-gray-700">🔬 口唇閉鎖力検査（りっぷるくん・3回測定）</label>
+                            </div>
+                            <p className="text-xs text-gray-400">{lipNorm?`${lipNorm.age}歳${lipNorm.gender==='f'?'女':'男'} 平均${lipNorm.mean}・-1SD ${lipNorm.minus1sd}N`:'りっぷるくん'}{prevPed&&prevPed.lipClosureForce?`／前回 ${prevPed.lipClosureForce}N`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 機器を水平に引っ張り、抜けた瞬間の最大値</p>
+                            <TestIntervalWarn warn={warnLip}/>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)} disabled={ro} free measured={lipMeasured}/>
+                              ))}
+                            </div>
+                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipGrade&&lipGrade.key==='low'?'bg-red-50 text-red-700':lipGrade&&lipGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
+                              平均（測定値）：<span className="font-bold text-base">{lipForce!==''?lipForce:'—'}</span> N{lip3nums.length>0&&lip3nums.length<3?`（${lip3nums.length}回入力）`:''}{!lipMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{lipForce===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
+                              {lipGrade&&lipGrade.key==='low' && <span className="ml-2 text-xs">⚠ -1SD以下（≦{lipNorm.minus1sd}N）→ 口唇閉鎖力不足</span>}
+                              {lipGrade&&lipGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{lipNorm.mean}Nより低め・-1SDは超えています）</span>}
+                              {lipGrade&&lipGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{lipNorm.mean}N以上）</span>}
+                            </div>
+                          </div>
+  );
+  const renderTongueBlock = () => (
+                          <div className="px-5 pb-4 pt-1 bg-blue-50/30">
+                            <label className="text-sm font-medium text-gray-700">🔬 舌圧検査（JMS舌圧計・3回測定）</label>
+                            <p className="text-xs text-gray-400">{tongueNorm?`${tongueNorm.age}歳 平均${tongueNorm.mean}・cut-off ${tongueNorm.cutoff}kPa`:'JMS舌圧計'}{prevPed&&prevPed.maxTonguePressure?`／前回 ${prevPed.maxTonguePressure}kPa`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
+                            <TestIntervalWarn warn={warnTongue}/>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro} free measured={tongueMeasured}/>
+                              ))}
+                            </div>
+                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueGrade&&tongueGrade.key==='low'?'bg-red-50 text-red-700':tongueGrade&&tongueGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
+                              平均（測定値）：<span className="font-bold text-base">{tonguePres!==''?tonguePres:'—'}</span> kPa{tongue3nums.length>0&&tongue3nums.length<3?`（${tongue3nums.length}回入力）`:''}{!tongueMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{tonguePres===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
+                              {tongueGrade&&tongueGrade.key==='low' && <span className="ml-2 text-xs">⚠ cut-off値以下（≦{tongueNorm.cutoff}kPa）→ 低舌圧</span>}
+                              {tongueGrade&&tongueGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{tongueNorm.mean}kPaより低め・cut-offは超えています）</span>}
+                              {tongueGrade&&tongueGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{tongueNorm.mean}kPa以上）</span>}
+                            </div>
+                          </div>
+  );
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
+      <div className="sticky top-0 z-30">{/* v62: 見返すときにステップのタブが常に上に残る */}
       <header className="bg-white shadow-sm px-6 py-4 flex items-center gap-4">
-        <button onClick={onBackHome} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ トップに戻る</button>
+        <button onClick={onBackHome} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ {isLoaded?'記録一覧に戻る':'トップに戻る'}</button>
         <div>
           <h1 className="text-lg font-bold text-gray-900">👶 口腔機能発達不全症</h1>
           {patient && age && <p className="text-xs text-gray-500">{patient.name}（{age.label} / {patient.gender==='male'?'男児':'女児'}）</p>}
@@ -3275,7 +3325,9 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
       </header>
       {/* 閲覧モードのバナー（常時表示） */}
       {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更するには項目をタップ）</div>}
-      {step!=='select' && <StepBar steps={PED_STEPS} current={step} onJump={k=>setStep(k)}/>}
+      {step==='retest' && <div className="bg-indigo-50 border-b border-indigo-200 text-indigo-800 text-sm font-medium px-6 py-2.5 text-center">🔁 再検査モード — 舌圧・りっぷるくんだけ入力</div>}
+      {step!=='select' && step!=='retest' && <StepBar steps={PED_STEPS} current={step} onJump={k=>setStep(k)} allJump={isLoaded}/>}
+      </div>
       {/* v55: 閲覧モード中は項目タップを捕捉して変更確認ポップを出す（data-ro-ok の付いたナビ系は素通し） */}
       <div className="flex-1 overflow-y-auto"
         onClickCapture={e=>{ if(!ro) return; if(e.target.closest && e.target.closest('[data-ro-ok]')) return; e.preventDefault(); e.stopPropagation(); setAskEdit(true); }}>
@@ -3283,6 +3335,21 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
         {/* v55: 患者タップ＝記録一覧へ。新規検査は記録一覧の「➕ 新規評価を開始」から */}
         {step==='select' && <PatientSelect onSelect={id=>nav({p:'history',patientId:id,returnTo:'pediatric'})} selected={pid} flowPage="pediatric"/>}
 
+        {step==='retest' && (
+          <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+            <div className="bg-white rounded-2xl shadow-sm p-5">
+              <p className="text-base font-bold text-gray-900">🔁 再検査（3か月ごとの再評価）</p>
+              <p className="text-xs text-gray-500 mt-1">舌圧とりっぷるくんの2つだけ入力します。問診（C項目 {checkedC.length}件）・メモは前回{retestBase?`（${formatDate(retestBase.date)}）`:''}の内容をそのまま引き継ぎ、新しい記録として保存します。</p>
+              <p className="text-xs text-gray-400 mt-1">問診の内容も見直したいときは「詳しく入力する」へ。</p>
+            </div>
+            <div className="bg-white rounded-2xl shadow-sm overflow-hidden">{renderLipBlock()}</div>
+            <div className="bg-white rounded-2xl shadow-sm overflow-hidden">{renderTongueBlock()}</div>
+            <div className="flex gap-3" data-ro-ok="1">
+              <Btn onClick={()=>setStep('questionnaire')} variant="secondary">📝 詳しく入力する</Btn>
+              <Btn onClick={()=>{ const r=doSave(); if(!r.ok) return; showToast('保存しました'); nav({p:'print',assessmentId:r.id}); }} cls="flex-1">💾 保存して印刷プレビューへ →</Btn>
+            </div>
+          </div>
+        )}
         {step==='questionnaire' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
             {/* 別紙1/別紙2 切替バナー */}
@@ -3317,46 +3384,8 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                       <React.Fragment key={item.id}>
                         <CheckRow id={item.id} label={item.label} detail={item.detail}
                           checked={checkedC.includes(item.id)} onChange={()=>toggleC(item.id)}/>
-                        {!isPreWeaning && item.id==='C-10' && (
-                          <div className="px-5 pb-4 pt-1 bg-blue-50/30">
-                            <div className="flex items-center justify-between mb-1">
-                              <label className="text-sm font-medium text-gray-700">🔬 口唇閉鎖力検査（りっぷるくん・3回測定）</label>
-                            </div>
-                            <p className="text-xs text-gray-400">{lipNorm?`${lipNorm.age}歳${lipNorm.gender==='f'?'女':'男'} 平均${lipNorm.mean}・-1SD ${lipNorm.minus1sd}N`:'りっぷるくん'}{prevPed&&prevPed.lipClosureForce?`／前回 ${prevPed.lipClosureForce}N`:''}</p>
-                            <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 機器を水平に引っ張り、抜けた瞬間の最大値</p>
-                            <TestIntervalWarn warn={warnLip}/>
-                            <div className="grid grid-cols-3 gap-2">
-                              {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)} disabled={ro} free measured={lipMeasured}/>
-                              ))}
-                            </div>
-                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipGrade&&lipGrade.key==='low'?'bg-red-50 text-red-700':lipGrade&&lipGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
-                              平均（測定値）：<span className="font-bold text-base">{lipForce!==''?lipForce:'—'}</span> N{lip3nums.length>0&&lip3nums.length<3?`（${lip3nums.length}回入力）`:''}{!lipMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{lipForce===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
-                              {lipGrade&&lipGrade.key==='low' && <span className="ml-2 text-xs">⚠ -1SD以下（≦{lipNorm.minus1sd}N）→ 口唇閉鎖力不足</span>}
-                              {lipGrade&&lipGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{lipNorm.mean}Nより低め・-1SDは超えています）</span>}
-                              {lipGrade&&lipGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{lipNorm.mean}N以上）</span>}
-                            </div>
-                          </div>
-                        )}
-                        {!isPreWeaning && item.id==='C-17' && (
-                          <div className="px-5 pb-4 pt-1 bg-blue-50/30">
-                            <label className="text-sm font-medium text-gray-700">🔬 舌圧検査（JMS舌圧計・3回測定）</label>
-                            <p className="text-xs text-gray-400">{tongueNorm?`${tongueNorm.age}歳 平均${tongueNorm.mean}・cut-off ${tongueNorm.cutoff}kPa`:'JMS舌圧計'}{prevPed&&prevPed.maxTonguePressure?`／前回 ${prevPed.maxTonguePressure}kPa`:''}</p>
-                            <p className="text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
-                            <TestIntervalWarn warn={warnTongue}/>
-                            <div className="grid grid-cols-3 gap-2">
-                              {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro} free measured={tongueMeasured}/>
-                              ))}
-                            </div>
-                            <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueGrade&&tongueGrade.key==='low'?'bg-red-50 text-red-700':tongueGrade&&tongueGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
-                              平均（測定値）：<span className="font-bold text-base">{tonguePres!==''?tonguePres:'—'}</span> kPa{tongue3nums.length>0&&tongue3nums.length<3?`（${tongue3nums.length}回入力）`:''}{!tongueMeasured && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{tonguePres===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
-                              {tongueGrade&&tongueGrade.key==='low' && <span className="ml-2 text-xs">⚠ cut-off値以下（≦{tongueNorm.cutoff}kPa）→ 低舌圧</span>}
-                              {tongueGrade&&tongueGrade.key==='mid' && <span className="ml-2 text-xs">やや弱め（平均{tongueNorm.mean}kPaより低め・cut-offは超えています）</span>}
-                              {tongueGrade&&tongueGrade.key==='good' && <span className="ml-2 text-xs">良好（平均{tongueNorm.mean}kPa以上）</span>}
-                            </div>
-                          </div>
-                        )}
+                        {!isPreWeaning && item.id==='C-10' && renderLipBlock()}
+                        {!isPreWeaning && item.id==='C-17' && renderTongueBlock()}
                         {item.cat==='栄養（体格）' && (
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
                             <p className="text-xs text-gray-500 mb-2">📏 身長・体重（カウプ／ローレル指数を自動計算。実測値を入力してください）</p>
@@ -3489,7 +3518,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
         <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
       )}
       {/* 入力途中の戻る警告 */}
-      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)} isEdit={!!savedId}
+      {showBackWarn && <UnsavedBackModal onLeave={leaveTo} onStay={()=>setShowBackWarn(false)} isEdit={!!savedId}
         onSaveLeave={()=>{ if(!doSave().ok) return; showToast(savedId?'保存しました':'一時保存しました'); nav({p:'home'}); }}/>}
       {/* 閲覧モード中に項目へ触れた→変更確認（v55） */}
       {askEdit && <EditConfirmModal onEdit={()=>{setRo(false);setAskEdit(false);}} onCancel={()=>setAskEdit(false)}/>}
@@ -3799,16 +3828,18 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     return {id:a.id, ok:okSave};
   };
   // ヘッダ「トップに戻る」：入力途中（未保存・閲覧でない）なら警告、それ以外は即home
+  const leaveTo = () => nav(isLoaded ? {p:'history', patientId:pid, returnTo:'adult'} : {p:'home'}); // v62: 保存済み記録は記録一覧へ戻る
   const onBackHome = () => {
     if(step!=='select' && !ro && (!savedId || dirtyRef.current)){ setShowBackWarn(true); }
-    else nav({p:'home'});
+    else leaveTo();
   };
   // NI is now module-level MeasInput — pass m and setMv via props
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
+      <div className="sticky top-0 z-30">{/* v62: 見返すときにステップのタブが常に上に残る */}
       <header className="bg-white shadow-sm px-6 py-4 flex items-center gap-4">
-        <button onClick={onBackHome} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ トップに戻る</button>
+        <button onClick={onBackHome} className="text-blue-600 flex items-center gap-1 text-sm font-medium">◀ {isLoaded?'記録一覧に戻る':'トップに戻る'}</button>
         <div>
           <h1 className="text-lg font-bold text-gray-900">👴 口腔機能低下症</h1>
           {patient && age && <p className="text-xs text-gray-500">{patient.name}（{age.label} / {patient.gender==='male'?'男性':'女性'}）</p>}
@@ -3816,7 +3847,8 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       </header>
       {/* 閲覧モードのバナー（常時表示） */}
       {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更するには項目をタップ）</div>}
-      {step!=='select' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)}/>}
+      {step!=='select' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)} allJump={isLoaded}/>}
+      </div>
       {/* v55: 閲覧モード中は項目タップを捕捉して変更確認ポップを出す（data-ro-ok の付いたナビ系は素通し） */}
       <div className="flex-1 overflow-y-auto"
         onClickCapture={e=>{ if(!ro) return; if(e.target.closest && e.target.closest('[data-ro-ok]')) return; e.preventDefault(); e.stopPropagation(); setAskEdit(true); }}>
@@ -4011,7 +4043,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
         <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
       )}
       {/* 入力途中の戻る警告 */}
-      {showBackWarn && <UnsavedBackModal onLeave={()=>nav({p:'home'})} onStay={()=>setShowBackWarn(false)} isEdit={!!savedId}
+      {showBackWarn && <UnsavedBackModal onLeave={leaveTo} onStay={()=>setShowBackWarn(false)} isEdit={!!savedId}
         onSaveLeave={()=>{ if(!doSave().ok) return; showToast(savedId?'保存しました':'一時保存しました'); nav({p:'home'}); }}/>}
       {/* 閲覧モード中に項目へ触れた→変更確認（v55） */}
       {askEdit && <EditConfirmModal onEdit={()=>{setRo(false);setAskEdit(false);}} onCancel={()=>setAskEdit(false)}/>}
@@ -4048,7 +4080,12 @@ function History({patientId, returnTo}) {
     <div className="min-h-screen bg-gray-50">
       <Header onBack={()=>nav(returnTo ? {p:returnTo} : {p:'home'})} backLabel="戻る" title={`${patient.name} さんの評価履歴`} sub={`${age.label} / ${patient.gender==='male'?'男性':'女性'}`}/>
       <div className="max-w-3xl mx-auto px-6 py-6 space-y-4">
-        <Btn onClick={()=>nav({p:age.years<18?'pediatric':'adult',patientId})}>➕ 新規評価を開始</Btn>
+        <div className="flex gap-3 flex-wrap">
+          <Btn onClick={()=>nav({p:age.years<18?'pediatric':'adult',patientId})} cls="flex-1">➕ 新規評価を開始</Btn>
+          {age.years<18 && assessments.some(a=>a.type==='pediatric') && (
+            <Btn variant="secondary" onClick={()=>nav({p:'pediatric',patientId,mode:'retest'})} cls="flex-1">🔁 再検査（舌圧・りっぷるくんだけ）</Btn>
+          )}
+        </div>
         {patientId && hasTrend && (
           <div className="bg-white rounded-2xl shadow-sm p-5">
             <p className="text-base font-bold text-gray-900 mb-3">📈 検査値の推移</p>
