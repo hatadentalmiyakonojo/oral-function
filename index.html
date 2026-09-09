@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '60';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '61';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1937,7 +1937,8 @@ function NumInput({label,hint,unit,value,onChange,abnormal,abnormalText}) {
 // リスト式の数値入力（iPadではホイール選択になり素早く選べる）
 // テンキー直接入力＋±ステッパー。blur/Enterで MEAS_SPEC にスナップ（snapToSpec 利用）
 //   free=true でプルダウンでなく数字キーボードの自由入力（舌圧・咬合圧など実測値を直接入れる項目・v58）
-function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText,disabled,free}) {
+//   measured=false（未検査＝初期値/前回値の表示だけ）のとき、free欄は空にして値を薄いヒントで見せる→タップしてすぐ打てる（v61）
+function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText,disabled,free,measured}) {
   const opts = MEAS_OPTS[specKey] || [];
   const spec = MEAS_SPEC[specKey];
   const num = parseFloat(value);
@@ -1950,7 +1951,7 @@ function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText
       </div>
       <div className="flex items-center gap-2">
         {free ? (
-          <input type="text" inputMode="decimal" value={value||''} placeholder="数値を入力" disabled={disabled}
+          <input type="text" inputMode="decimal" value={measured===false?'':(value||'')} placeholder={measured===false&&value?String(value):'数値を入力'} disabled={disabled}
             onChange={e=>onChange(e.target.value.replace(/[^0-9.]/g,''))}
             className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}/>
         ) : (
@@ -3112,11 +3113,12 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const lip3nums = lip3.map(parseFloat).filter(x=>!isNaN(x));
   const lipForce = lip3nums.length ? (Math.round(lip3nums.reduce((a,b)=>a+b,0)/lip3nums.length*10)/10).toFixed(1) : '';
   // 閲覧モード（ro）では各入力を無効化
-  const setLip = (i,v) => { if(ro) return; markPed('lipClosureForce'); setLip3(p=>{const n=[...p];n[i]=v;return n;}); };
+  const firstTouch = k => !(Array.isArray(touched) && touched.indexOf(k)>=0); // そのグループを初めて触るか（v61）
+  const setLip = (i,v) => { if(ro) return; const fresh=firstTouch('lipClosureForce'); markPed('lipClosureForce'); setLip3(p=>{const n=fresh?['','','']:[...p];n[i]=v;return n;}); };
   // JMS舌圧：入力済みの回の平均が測定値（小数1位）
   const tongue3nums = tongue3.map(parseFloat).filter(x=>!isNaN(x));
   const tonguePres = tongue3nums.length ? (Math.round(tongue3nums.reduce((a,b)=>a+b,0)/tongue3nums.length*10)/10).toFixed(1) : '';
-  const setTongue = (i,v) => { if(ro) return; markPed('maxTonguePressure'); setTongue3(p=>{const n=[...p];n[i]=v;return n;}); };
+  const setTongue = (i,v) => { if(ro) return; const fresh=firstTouch('maxTonguePressure'); markPed('maxTonguePressure'); setTongue3(p=>{const n=fresh?['','','']:[...p];n[i]=v;return n;}); };
   // 閲覧モードガード付きセッター（身長・体重・メモ）
   const setHeightRO = v => { if(ro) return; markPed('height'); setHeight(v); };
   const setWeightRO = v => { if(ro) return; markPed('weight'); setWeight(v); };
@@ -3325,7 +3327,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                             <TestIntervalWarn warn={warnLip}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)} disabled={ro}/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="N" specKey="lipForce" value={lip3[i]} onChange={v=>setLip(i,v)} disabled={ro} free measured={lipMeasured}/>
                               ))}
                             </div>
                             <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce===''?'bg-gray-50 text-gray-500':lipGrade&&lipGrade.key==='low'?'bg-red-50 text-red-700':lipGrade&&lipGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
@@ -3344,7 +3346,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                             <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro} free/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro} free measured={tongueMeasured}/>
                               ))}
                             </div>
                             <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueGrade&&tongueGrade.key==='low'?'bg-red-50 text-red-700':tongueGrade&&tongueGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
@@ -3527,7 +3529,7 @@ function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled,free,pl
       <div className="flex items-center gap-1.5">
         {free ? (
           // 数字キーボードで直接入力（数字・小数点のみ許可。空欄は未検査）
-          <input type="text" inputMode="decimal" value={val} placeholder={placeholder||'数値を入力'} disabled={disabled}
+          <input type="text" inputMode="decimal" value={unmeasured?'':val} placeholder={unmeasured&&val?String(val):(placeholder||'数値を入力')} disabled={disabled}
             onChange={e=>{ const v=e.target.value.replace(/[^0-9.]/g,''); setM(mkey, v); }}
             className={cls}/>
         ) : (
@@ -3763,7 +3765,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const setMv = (k,v) => { if(ro) return; setM(p=>({...p,[k]:v, touched:markTouched(p,k)})); };
   // 最大舌圧：JMS舌圧計で3回測定し、入力済みの回の平均を測定値とする（りっぷるくんと同方式）
   const setTongue3 = (i,v) => { if(ro) return; setM(p=>{
-    const arr=[...(p.tonguePres3||['','',''])]; arr[i]=v;
+    const arr = isMeasured(p,'maxTonguePressure') ? [...(p.tonguePres3||['','',''])] : ['','','']; arr[i]=v; // v61: 初回入力時は表示用の値を捨てる
     const nums=arr.map(parseFloat).filter(x=>!isNaN(x));
     const avg=nums.length?(Math.round(nums.reduce((a,b)=>a+b,0)/nums.length*10)/10).toFixed(1):'';
     return {...p, tonguePres3:arr, maxTonguePressure:avg, touched:markTouched(p,'maxTonguePressure')};
@@ -3771,7 +3773,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   // 口腔湿潤度（ムーカス）：連続3回測定し、その中央値を測定値とする（v56）
   //   センサーの圧接角度で生じるはずれ値を除外するため平均でなく中央値を採用
   const setMoist3 = (i,v) => { if(ro) return; setM(p=>{
-    const arr=[...(p.moist3||['','',''])]; arr[i]=v;
+    const arr = isMeasured(p,'oralMoisture') ? [...(p.moist3||['','',''])] : ['','','']; arr[i]=v; // v61: 初回入力時は表示用の値を捨てる
     return {...p, moist3:arr, oralMoisture: medianOf(arr), touched:markTouched(p,'oralMoisture')};
   }); };
   // 舌マップ（9分割）からTCI%を自動計算。null=未検査
@@ -3896,7 +3898,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                             <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro} free/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro} free measured={isMeasured(m,'maxTonguePressure')}/>
                               ))}
                             </div>
                             <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.maxTonguePressure===''||!isMeasured(m,'maxTonguePressure'))?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
