@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '57';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '58';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 2;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1900,8 +1900,12 @@ function NumInput({label,hint,unit,value,onChange,abnormal,abnormalText}) {
 }
 // リスト式の数値入力（iPadではホイール選択になり素早く選べる）
 // テンキー直接入力＋±ステッパー。blur/Enterで MEAS_SPEC にスナップ（snapToSpec 利用）
-function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText,disabled}) {
+//   free=true でプルダウンでなく数字キーボードの自由入力（舌圧・咬合圧など実測値を直接入れる項目・v58）
+function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText,disabled,free}) {
   const opts = MEAS_OPTS[specKey] || [];
+  const spec = MEAS_SPEC[specKey];
+  const num = parseFloat(value);
+  const outOfRange = free && value!=='' && value!=null && !isNaN(num) && spec && (num<spec.min || num>spec.max);
   return (
     <div>
       <div className="flex justify-between mb-1">
@@ -1909,14 +1913,21 @@ function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText
         {hint && <span className="text-xs text-gray-400">{hint}</span>}
       </div>
       <div className="flex items-center gap-2">
-        <select value={value||''} onChange={e=>onChange(e.target.value)} disabled={disabled}
-          className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}>
-          <option value="">—</option>
-          {opts.map(o=><option key={o} value={o}>{o}</option>)}
-        </select>
+        {free ? (
+          <input type="text" inputMode="decimal" value={value||''} placeholder="数値を入力" disabled={disabled}
+            onChange={e=>onChange(e.target.value.replace(/[^0-9.]/g,''))}
+            className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}/>
+        ) : (
+          <select value={value||''} onChange={e=>onChange(e.target.value)} disabled={disabled}
+            className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}>
+            <option value="">—</option>
+            {opts.map(o=><option key={o} value={o}>{o}</option>)}
+          </select>
+        )}
         {unit && <span className="text-sm text-gray-500">{unit}</span>}
         {abnormal && value!=='' && <span className="text-xs text-red-600">⚠ {abnormalText||'基準値以下'}</span>}
       </div>
+      {outOfRange && <p className="text-xs text-amber-600 mt-0.5">⚠ 桁を確認してください（通常 {spec.min}〜{spec.max}{unit}）</p>}
     </div>
   );
 }
@@ -2935,14 +2946,18 @@ function PhotoAttach({photos, onAdd, onRemove, ro}) {
   const list = photos || [];
   const remain = Math.max(0, MAX - list.length);
   const onPick = async (e) => {
-    const files = e.target.files;
-    e.target.value = ''; // 同じファイルを連続選択できるようにクリア
-    if(!files || !files.length) return;
+    const input = e.target;
+    // ★v58 重要: input.value='' すると input.files（FileList）は同じ参照のまま空になる。
+    //   以前はクリアしてから files.length を見ていたため、必ず0件になり写真が1枚も追加されなかった。
+    //   File の実体を配列へ写してから処理し、クリアは最後に行う。
+    const files = input.files ? Array.from(input.files) : [];
+    if(!files.length){ input.value=''; return; }
     setErr('');
     setBusy(true);
     try { await onAdd(files); }
     catch(ex){ setErr('写真の追加に失敗しました：'+(ex&&ex.message?ex.message:'不明なエラー')); }
     setBusy(false);
+    input.value = ''; // 同じ写真を続けて選べるよう、処理が終わってからクリア
   };
   return (
     <div>
@@ -3113,14 +3128,14 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
     const yrs = age.years;
     const ln = lipForceNorm(yrs, patient.gender);   // 口唇閉鎖力の年齢性別平均
     const tn = pedTongueNorm(yrs);                   // 最大舌圧の年齢別平均
-    const gr = growthAvg(yrs, patient.gender);       // 身長・体重の年齢性別平均
     const pv = k => prevPed && prevPed[k]!=='' && prevPed[k]!=null ? parseFloat(prevPed[k]) : null;
     const lipStart = pv('lipClosureForce')!=null ? snapToSpec('lipForce', pv('lipClosureForce')) : (ln ? snapToSpec('lipForce', ln.mean) : '');
     setLip3([lipStart, lipStart, lipStart]); // 3回分とも開始値をプリセット（各回を実測値に調整）
     const tongueStart = pv('maxTonguePressure')!=null ? snapToSpec('pedTongue', pv('maxTonguePressure')) : (tn ? snapToSpec('pedTongue', tn.mean) : '');
     setTongue3([tongueStart, tongueStart, tongueStart]); // 3回分とも開始値をプリセット
-    setHeight(pv('height')!=null ? snapToSpec('pedHeight', pv('height')) : (gr ? snapToSpec('pedHeight', gr.h) : ''));
-    setWeight(pv('weight')!=null ? snapToSpec('pedWeight', pv('weight')) : (gr ? snapToSpec('pedWeight', gr.w) : ''));
+    // v58: 身長・体重に年齢平均を入れるのは廃止（実測でない値が入ると誤解のもと）。前回の実測値があるときだけ引き継ぐ
+    setHeight(pv('height')!=null ? snapToSpec('pedHeight', pv('height')) : '');
+    setWeight(pv('weight')!=null ? snapToSpec('pedWeight', pv('weight')) : '');
   }, [pid]);
 
   // 過去評価の読込時：各写真idをIndexedDBから取得してdataURLを充填。見つからなければ「画像なし」タイル。
@@ -3292,7 +3307,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                             <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro}/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="pedTongue" value={tongue3[i]} onChange={v=>setTongue(i,v)} disabled={ro} free/>
                               ))}
                             </div>
                             <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres===''?'bg-gray-50 text-gray-500':tongueGrade&&tongueGrade.key==='low'?'bg-red-50 text-red-700':tongueGrade&&tongueGrade.key==='mid'?'bg-amber-50 text-amber-700':'bg-green-50 text-green-700'}`}>
@@ -3305,7 +3320,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                         )}
                         {item.cat==='栄養（体格）' && (
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
-                            <p className="text-xs text-gray-500 mb-2">📏 身長・体重（カウプ／ローレル指数を自動計算。初期値は年齢性別の平均）</p>
+                            <p className="text-xs text-gray-500 mb-2">📏 身長・体重（カウプ／ローレル指数を自動計算。実測値を入力してください）</p>
                             <div className="grid grid-cols-2 gap-3">
                               <SelectNum label="身長" unit="cm" specKey="pedHeight" value={height} onChange={setHeightRO} disabled={ro}/>
                               <SelectNum label="体重" unit="kg" specKey="pedWeight" value={weight} onChange={setWeightRO} disabled={ro}/>
@@ -3835,7 +3850,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                             <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro}/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro} free/>
                               ))}
                             </div>
                             <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.maxTonguePressure===''||!isMeasured(m,'maxTonguePressure'))?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
@@ -4150,7 +4165,8 @@ function BillingMemo({a, patient, age, isPed}){
 function PrintPreview({assessmentId}) {
   const nav = useNav();
   const {getAssessment, getPatient, clinic, assessments} = useS();
-  const [docType, setDocType] = useState('patient'); // 'patient'=患者配布用 / 'plan'=管理計画書（院内用）
+  // v58: 'both'=まとめて印刷（お知らせ1部＋管理計画書2部・B5）。院内では毎回この2つを続けて印刷するため既定にした
+  const [docType, setDocType] = useState('both'); // 'both' / 'patient'=患者配布用 / 'plan'=管理計画書（院内用） / 'billing'=算定メモ
   const [paper, setPaper] = useState('B5');           // 用紙サイズ A4/B5（既定B5）
   // 用紙ごとの印刷可能幅（用紙幅 − 左右余白10mm×2）。Safari等@page非対応環境でも実寸を担保
   const PAPER = {A4:{w:190, prev:680}, B5:{w:156, prev:560}};
@@ -4169,9 +4185,17 @@ function PrintPreview({assessmentId}) {
   const birthWareki = `${bw.era}${bw.ey===1?'元':bw.ey}年${bm}月${bdd}日`;
   const isPlan = docType==='plan';
   const isBilling = docType==='billing'; // 算定メモ（院内用）タブ
+  const isBoth = docType==='both';      // まとめて印刷（お知らせ→管理計画書2部）
+  // タブ切替。まとめて印刷は必ずB5（お知らせだけA4になる事故を防ぐ）
+  const selectDoc = (t) => { setDocType(t); if(t==='both') setPaper('B5'); };
 
   // 1枚分の本文（タイトル＋基本情報＋本体＋医院フッター）。管理計画書は2部印刷のため2回描画する
-  const renderSheetBody = () => (
+  //   type: 'patient'（お知らせ）/ 'plan'（管理計画書）/ 'billing'（算定メモ）
+  //   v58: まとめて印刷では1回のレンダリングで種別の違う紙を並べるため、状態でなく引数で切り替える
+  const renderSheetBody = (type) => {
+    const isPlan = type==='plan';
+    const isBilling = type==='billing';
+    return (
     <>
       {!isBilling && (
         <div style={{textAlign:'center',marginBottom:'12px'}}>
@@ -4216,7 +4240,8 @@ function PrintPreview({assessmentId}) {
         <span style={{fontSize:'10px',color:'#888'}}>{formatDate(new Date().toISOString())}</span>
       </div>
     </>
-  );
+    );
+  };
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -4225,9 +4250,10 @@ function PrintPreview({assessmentId}) {
           className="text-blue-600 flex items-center gap-1 text-sm font-medium whitespace-nowrap flex-shrink-0">◀ {isPed?'トレーニング処方に戻る':'L項目・検査に戻る'}</button>
         <h1 className="text-lg font-bold text-gray-900 flex-1 whitespace-nowrap">印刷プレビュー</h1>
         <div className="flex rounded-xl overflow-hidden border border-gray-200">
-          <button onClick={()=>setDocType('patient')} className={`px-4 py-2 text-sm font-medium ${docType==='patient'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>👨‍👩‍👧 患者配布用</button>
-          <button onClick={()=>setDocType('plan')} className={`px-4 py-2 text-sm font-medium ${docType==='plan'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>📋 管理計画書</button>
-          <button onClick={()=>setDocType('billing')} className={`px-4 py-2 text-sm font-medium ${docType==='billing'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>💰 算定メモ</button>
+          <button onClick={()=>selectDoc('both')} className={`px-4 py-2 text-sm font-medium ${docType==='both'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>🖨️ まとめて印刷</button>
+          <button onClick={()=>selectDoc('patient')} className={`px-4 py-2 text-sm font-medium ${docType==='patient'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>👨‍👩‍👧 患者配布用</button>
+          <button onClick={()=>selectDoc('plan')} className={`px-4 py-2 text-sm font-medium ${docType==='plan'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>📋 管理計画書</button>
+          <button onClick={()=>selectDoc('billing')} className={`px-4 py-2 text-sm font-medium ${docType==='billing'?'bg-blue-600 text-white':'bg-white text-gray-600 hover:bg-gray-50'}`}>💰 算定メモ</button>
         </div>
         <div className="flex rounded-xl overflow-hidden border border-gray-200" title="用紙サイズ">
           {['B5','A4'].map(sz=>(
@@ -4240,6 +4266,7 @@ function PrintPreview({assessmentId}) {
 
       {/* 選択した用紙サイズを印刷に反映（@page）＋@page非対応環境でも実寸が出るよう印刷時の用紙幅を固定 */}
       <style>{`@page{size:${paper};margin:8mm 10mm}@media print{.print-sheet{width:${PAPER[paper].w}mm !important;max-width:${PAPER[paper].w}mm !important;margin:0 auto !important}}`}</style>
+      {isBoth && <p className="text-center text-xs text-gray-600 pt-4 no-print">📄 <b>{paper}</b>で続けて印刷されます：<b>お口の機能チェック結果のお知らせ 1部</b> ＋ <b>管理計画書 2部</b>（1部 カルテ用・1部 患者用）</p>}
       {isPlan && <p className="text-center text-xs text-gray-500 pt-4 no-print">📄 管理計画書は2部印刷されます（1部 カルテ用・1部 患者用）</p>}
       <div className="print-sheet" style={{maxWidth:`${PAPER[paper].prev}px`,margin:'24px auto',background:'white',boxShadow:'0 2px 16px #0002',padding:'12mm 12mm'}}>
         {!clinic.name && (
@@ -4247,9 +4274,20 @@ function PrintPreview({assessmentId}) {
             ⚠ クリニック情報が未設定です — 設定画面から登録してください
           </div>
         )}
-        {renderSheetBody()}
-        {/* 管理計画書は同じ内容を2部印刷（画面では2部目を隠し、印刷時のみ次ページに出す） */}
-        {isPlan && <div className="pb-next print-only">{renderSheetBody()}</div>}
+        {isBoth ? (
+          // v58: まとめて印刷＝お知らせ1部 → 管理計画書1部目 → 管理計画書2部目（2部目は印刷時のみ）
+          <>
+            {renderSheetBody('patient')}
+            <div className="pb-next">{renderSheetBody('plan')}</div>
+            <div className="pb-next print-only">{renderSheetBody('plan')}</div>
+          </>
+        ) : (
+          <>
+            {renderSheetBody(docType)}
+            {/* 管理計画書は同じ内容を2部印刷（画面では2部目を隠し、印刷時のみ次ページに出す） */}
+            {isPlan && <div className="pb-next print-only">{renderSheetBody('plan')}</div>}
+          </>
+        )}
       </div>
     </div>
   );
