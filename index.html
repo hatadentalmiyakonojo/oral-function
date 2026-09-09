@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '62';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '63';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -2908,7 +2908,7 @@ function PatientForm({patientId, returnTo}) {
 // SHARED MODALS（フロー共通）
 // ═══════════════════════════════════════════════
 // 担当者選択モーダル：担当医師・担当衛生士を設定リストから選ぶ。初期選択は各リスト先頭
-function StaffSelectModal({docList, hygList, doc, setDoc, hyg, setHyg, date, setDate, onConfirm}) {
+function StaffSelectModal({docList, hygList, doc, setDoc, hyg, setHyg, date, setDate, onConfirm, onCancel}) {
   const selCls = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400";
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 px-6">
@@ -2937,7 +2937,10 @@ function StaffSelectModal({docList, hygList, doc, setDoc, hyg, setHyg, date, set
                 </select>}
           </div>
         </div>
-        <div className="mt-6"><Btn onClick={onConfirm} cls="w-full">決定</Btn></div>
+        <div className="mt-6 flex gap-3">
+          {onCancel && <Btn onClick={onCancel} variant="gray" cls="flex-1">キャンセル（前の画面へ）</Btn>}
+          <Btn onClick={onConfirm} cls="flex-1">決定</Btn>
+        </div>
       </div>
     </div>
   );
@@ -3515,7 +3518,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
       </div>
       {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
       {showStaff && !isLoaded && !ro && (
-        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff} onCancel={()=>nav(pid?{p:'history',patientId:pid,returnTo:'pediatric'}:{p:'home'})}/>
       )}
       {/* 入力途中の戻る警告 */}
       {showBackWarn && <UnsavedBackModal onLeave={leaveTo} onStay={()=>setShowBackWarn(false)} isEdit={!!savedId}
@@ -3705,7 +3708,10 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     if(!Array.isArray(lm.touched)) delete base.touched;
     return base;
   })() : null;
-  const [step,setStep] = useState((initPid||isLoaded)?'litems':'select');
+  // v63: 再検査モード（3か月ごとの再評価＝舌圧・咬合圧・湿潤度＝点数のある3検査だけ入力）。前回の成人記録を引き継いで新しい記録を作る
+  const isRetest = mode==='retest' && !!initPid && !isLoaded;
+  const retestBase = isRetest ? (assessments.filter(x=>x.patientId===initPid && x.type==='adult').sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null) : null;
+  const [step,setStep] = useState((initPid||isLoaded) ? ((isRetest && retestBase) ? 'retest' : 'litems') : 'select');
   // v55: 記録一覧の「新規評価を開始」から来た場合（initPidあり・読込なし）は担当者選択を自動で開く
   useEffect(()=>{ if(initPid && !isLoaded) setShowStaff(true); },[]);
   const [pid,setPid] = useState(loaded?loaded.patientId:(initPid||''));
@@ -3713,12 +3719,17 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const [m,setM] = useState(loadedM||{...EMPTY_M});
   // 手動L項目の復元：保存済み checkedLItems から自動判定分（measL）を除いた差分。算出不能時は全件をそのまま手動扱い
   const [manualL,setManualL] = useState(()=>{
+    if(retestBase){ // 再検査: 前回の手動チェック分（視診等）だけ引き継ぐ。検査由来の自動判定は今回の測定値から出し直す
+      const saved = retestBase.checkedLItems||[];
+      try { const auto = computeMeasurementLItems({...EMPTY_M, ...(retestBase.measurements||{})}, adultTongueCutoff(null,null)); return saved.filter(x=>!auto.includes(x)); }
+      catch(e){ return saved; }
+    }
     if(!loaded) return [];
     const saved = loaded.checkedLItems||[];
     try { const auto = computeMeasurementLItems(loadedM, adultTongueCutoff(null,null)); return saved.filter(x=>!auto.includes(x)); }
     catch(e){ return saved; }
   });
-  const [notes,setNotes] = useState(loaded?(loaded.notes||''):'');
+  const [notes,setNotes] = useState(loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
   const [savedId,setSavedId] = useState(assessmentId||null); // 読込時は savedId=評価ID → 保存は updateAssessment
   // 担当者（評価時に選択）。読込時は評価データから復元
   const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
@@ -3835,6 +3846,59 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   };
   // NI is now module-level MeasInput — pass m and setMv via props
 
+  // 湿潤度／咬合力／舌圧の入力ブロック（L項目ステップ・再検査画面で共用。v63）
+  const renderMoistBlock = () => (
+<div className="ml-7 space-y-2">
+                            <p className="text-xs text-gray-500">口腔湿潤度（ムーカス・3回測定／基準27未満で口腔乾燥）{prevA&&prevA.measurements&&prevA.measurements.oralMoisture?`／前回 ${prevA.measurements.oralMoisture}`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 連続3回測定し、その<strong>中央値</strong>を測定値とします（センサーの圧接角度で生じるはずれ値を除くため）。舌背中央部で一定圧・2秒</p>
+                            <TestIntervalWarn warn={warnMoist}/>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="" specKey="oralMoisture" value={(m.moist3||['','',''])[i]} onChange={v=>setMoist3(i,v)} disabled={ro}/>
+                              ))}
+                            </div>
+                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.oralMoisture===''||!isMeasured(m,'oralMoisture'))?'bg-gray-50 text-gray-500':parseFloat(m.oralMoisture)<27?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                              中央値（測定値）：<span className="font-bold text-base">{m.oralMoisture!==''?m.oralMoisture:'—'}</span>{(()=>{const n=(m.moist3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'oralMoisture') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{m.oralMoisture===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
+                              {isMeasured(m,'oralMoisture') && parseFloat(m.oralMoisture)<27 && <span className="ml-2 text-xs">⚠ 基準未満（＜27）→ 口腔乾燥</span>}
+                            </div>
+                            <MoreBox label="サクソンテストを入力（当院では通常検査しません）" forceOpen={m.saxonTest!==''}>
+                              <div className="w-44"><MeasInput label="サクソンテスト" unit="g/2min" mkey="saxonTest" thr={2} m={m} setM={setMv} disabled={ro}/></div>
+                            </MoreBox>
+                          </div>
+  );
+  const renderBiteBlock = () => (
+<div className="ml-7 space-y-2">
+                            <div className="flex gap-4 text-sm">
+                              {[[true,'フィルタあり（<350N）'],[false,'フィルタなし（<500N）']].map(([f,l])=>(
+                                <label key={String(f)} className={`flex items-center gap-1.5 ${ro?'cursor-default':'cursor-pointer'}`}>
+                                  <input type="radio" name="biteFilter" checked={m.biteFilter===f} onChange={()=>setMv('biteFilter',f)} disabled={ro}/> {l}
+                                </label>
+                              ))}
+                            </div>
+                            <TestIntervalWarn warn={warnBite}/>
+                            <div className="grid grid-cols-2 gap-3">
+                              {/* 咬合圧はプルダウンでなく数字キーボードで実測値を直接入力（v56） */}
+                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv} disabled={ro} free placeholder="例）450.5"/>
+                              <MeasInput label="残存歯数" unit="本" mkey="remainingTeeth" thr={20} m={m} setM={setMv} disabled={ro}/>
+                            </div>
+                          </div>
+  );
+  const renderTongueBlock = () => (
+<div className="ml-7 space-y-2">
+                            <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／目安≧{tongueCut}kPa）{prevA&&prevA.measurements&&prevA.measurements.maxTonguePressure?`／前回 ${prevA.measurements.maxTonguePressure}kPa`:''}</p>
+                            <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
+                            <TestIntervalWarn warn={warnTongue}/>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[0,1,2].map(i=>(
+                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro} free measured={isMeasured(m,'maxTonguePressure')}/>
+                              ))}
+                            </div>
+                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.maxTonguePressure===''||!isMeasured(m,'maxTonguePressure'))?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                              平均（測定値）：<span className="font-bold text-base">{m.maxTonguePressure!==''?m.maxTonguePressure:'—'}</span> kPa{(()=>{const n=(m.tonguePres3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'maxTonguePressure') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{m.maxTonguePressure===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
+                              {isMeasured(m,'maxTonguePressure') && parseFloat(m.maxTonguePressure)<tongueCut && <span className="ml-2 text-xs">⚠ 目安未満（＜{tongueCut}kPa）→ 低舌圧</span>}
+                            </div>
+                          </div>
+  );
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <div className="sticky top-0 z-30">{/* v62: 見返すときにステップのタブが常に上に残る */}
@@ -3847,7 +3911,8 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       </header>
       {/* 閲覧モードのバナー（常時表示） */}
       {ro && <div className="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm font-medium px-6 py-2.5 text-center">👁 閲覧モード — 過去の検査データ（変更するには項目をタップ）</div>}
-      {step!=='select' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)} allJump={isLoaded}/>}
+      {step==='retest' && <div className="bg-indigo-50 border-b border-indigo-200 text-indigo-800 text-sm font-medium px-6 py-2.5 text-center">🔁 再検査モード — 舌圧・咬合圧・湿潤度だけ入力</div>}
+      {step!=='select' && step!=='retest' && <StepBar steps={ADU_STEPS} current={step} onJump={k=>setStep(k)} allJump={isLoaded}/>}
       </div>
       {/* v55: 閲覧モード中は項目タップを捕捉して変更確認ポップを出す（data-ro-ok の付いたナビ系は素通し） */}
       <div className="flex-1 overflow-y-auto"
@@ -3856,6 +3921,22 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
         {/* v55: 患者タップ＝記録一覧へ。新規検査は記録一覧の「➕ 新規評価を開始」から */}
         {step==='select' && <PatientSelect onSelect={id=>nav({p:'history',patientId:id,returnTo:'adult'})} selected={pid} flowPage="adult"/>}
 
+        {step==='retest' && (
+          <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+            <div className="bg-white rounded-2xl shadow-sm p-5">
+              <p className="text-base font-bold text-gray-900">🔁 再検査（3か月ごとの再評価）</p>
+              <p className="text-xs text-gray-500 mt-1">点数のある3つの検査（舌圧・咬合圧・口腔粘膜湿潤度）だけ入力します。視診等で付けたL項目（{manualL.length}件）・メモは前回{retestBase?`（${formatDate(retestBase.date)}）`:''}の内容を引き継ぎ、新しい記録として保存します。検査由来の判定は今回の測定値で出し直します。</p>
+              <p className="text-xs text-gray-400 mt-1">他の項目も見直したいときは「詳しく入力する」へ。</p>
+            </div>
+            <div className="bg-white rounded-2xl shadow-sm p-5 space-y-2"><p className="text-sm font-semibold text-gray-800">L-5 低舌圧 — 舌圧検査</p>{renderTongueBlock()}</div>
+            <div className="bg-white rounded-2xl shadow-sm p-5 space-y-2"><p className="text-sm font-semibold text-gray-800">L-3 咬合力低下 — 咬合圧検査</p>{renderBiteBlock()}</div>
+            <div className="bg-white rounded-2xl shadow-sm p-5 space-y-2"><p className="text-sm font-semibold text-gray-800">L-2 口腔乾燥 — 口腔粘膜湿潤度検査</p>{renderMoistBlock()}</div>
+            <div className="flex gap-3" data-ro-ok="1">
+              <Btn onClick={()=>setStep('litems')} variant="secondary">📝 詳しく入力する</Btn>
+              <Btn onClick={()=>{ const r=doSave(); if(!r.ok) return; showToast('保存しました'); nav({p:'print',assessmentId:r.id}); }} cls="flex-1">💾 保存して印刷プレビューへ →</Btn>
+            </div>
+          </div>
+        )}
         {step==='litems' && (
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
             <InfoBanner text="検査結果を入力すると、基準値を満たした項目が自動でチェックされます（● 付き）。視診等で追加する場合は項目名をタップしてください。触っていない項目は「未検査」として保存されます（画面の初期値は保存されません）。"/>
@@ -3889,56 +3970,13 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                               <div className="w-44"><MeasInput label="細菌数レベル" unit="Lv" mkey="bacteriaLevel" thr={4} dir="gte" m={m} setM={setMv} disabled={ro}/></div>
                             </MoreBox>
                           </div>}
-                          {item.id==='L-2' && <div className="ml-7 space-y-2">
-                            <p className="text-xs text-gray-500">口腔湿潤度（ムーカス・3回測定／基準27未満で口腔乾燥）{prevA&&prevA.measurements&&prevA.measurements.oralMoisture?`／前回 ${prevA.measurements.oralMoisture}`:''}</p>
-                            <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 連続3回測定し、その<strong>中央値</strong>を測定値とします（センサーの圧接角度で生じるはずれ値を除くため）。舌背中央部で一定圧・2秒</p>
-                            <TestIntervalWarn warn={warnMoist}/>
-                            <div className="grid grid-cols-3 gap-2">
-                              {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="" specKey="oralMoisture" value={(m.moist3||['','',''])[i]} onChange={v=>setMoist3(i,v)} disabled={ro}/>
-                              ))}
-                            </div>
-                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.oralMoisture===''||!isMeasured(m,'oralMoisture'))?'bg-gray-50 text-gray-500':parseFloat(m.oralMoisture)<27?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
-                              中央値（測定値）：<span className="font-bold text-base">{m.oralMoisture!==''?m.oralMoisture:'—'}</span>{(()=>{const n=(m.moist3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'oralMoisture') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{m.oralMoisture===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
-                              {isMeasured(m,'oralMoisture') && parseFloat(m.oralMoisture)<27 && <span className="ml-2 text-xs">⚠ 基準未満（＜27）→ 口腔乾燥</span>}
-                            </div>
-                            <MoreBox label="サクソンテストを入力（当院では通常検査しません）" forceOpen={m.saxonTest!==''}>
-                              <div className="w-44"><MeasInput label="サクソンテスト" unit="g/2min" mkey="saxonTest" thr={2} m={m} setM={setMv} disabled={ro}/></div>
-                            </MoreBox>
-                          </div>}
-                          {item.id==='L-3' && <div className="ml-7 space-y-2">
-                            <div className="flex gap-4 text-sm">
-                              {[[true,'フィルタあり（<350N）'],[false,'フィルタなし（<500N）']].map(([f,l])=>(
-                                <label key={String(f)} className={`flex items-center gap-1.5 ${ro?'cursor-default':'cursor-pointer'}`}>
-                                  <input type="radio" name="biteFilter" checked={m.biteFilter===f} onChange={()=>setMv('biteFilter',f)} disabled={ro}/> {l}
-                                </label>
-                              ))}
-                            </div>
-                            <TestIntervalWarn warn={warnBite}/>
-                            <div className="grid grid-cols-2 gap-3">
-                              {/* 咬合圧はプルダウンでなく数字キーボードで実測値を直接入力（v56） */}
-                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv} disabled={ro} free placeholder="例）450.5"/>
-                              <MeasInput label="残存歯数" unit="本" mkey="remainingTeeth" thr={20} m={m} setM={setMv} disabled={ro}/>
-                            </div>
-                          </div>}
-                          {item.id==='L-4' && <div className="ml-7 grid grid-cols-3 gap-3">
+                          {item.id==='L-2' && renderMoistBlock()}
+                          {item.id==='L-3' && renderBiteBlock()}
+{item.id==='L-4' && <div className="ml-7 grid grid-cols-3 gap-3">
                             <MeasInput label="DDK-パ" unit="回/秒" mkey="ddk_pa" thr={6} m={m} setM={setMv} disabled={ro}/><MeasInput label="DDK-タ" unit="回/秒" mkey="ddk_ta" thr={6} m={m} setM={setMv} disabled={ro}/><MeasInput label="DDK-カ" unit="回/秒" mkey="ddk_ka" thr={6} m={m} setM={setMv} disabled={ro}/>
                           </div>}
-                          {item.id==='L-5' && <div className="ml-7 space-y-2">
-                            <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／目安≧{tongueCut}kPa）{prevA&&prevA.measurements&&prevA.measurements.maxTonguePressure?`／前回 ${prevA.measurements.maxTonguePressure}kPa`:''}</p>
-                            <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
-                            <TestIntervalWarn warn={warnTongue}/>
-                            <div className="grid grid-cols-3 gap-2">
-                              {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro} free measured={isMeasured(m,'maxTonguePressure')}/>
-                              ))}
-                            </div>
-                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.maxTonguePressure===''||!isMeasured(m,'maxTonguePressure'))?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
-                              平均（測定値）：<span className="font-bold text-base">{m.maxTonguePressure!==''?m.maxTonguePressure:'—'}</span> kPa{(()=>{const n=(m.tonguePres3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'maxTonguePressure') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{m.maxTonguePressure===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
-                              {isMeasured(m,'maxTonguePressure') && parseFloat(m.maxTonguePressure)<tongueCut && <span className="ml-2 text-xs">⚠ 目安未満（＜{tongueCut}kPa）→ 低舌圧</span>}
-                            </div>
-                          </div>}
-                          {item.id==='L-6' && <div className="ml-7"><MeasInput label="グルコース濃度" unit="mg/dL" mkey="masticationScore" thr={100} m={m} setM={setMv} disabled={ro}/></div>}
+                          {item.id==='L-5' && renderTongueBlock()}
+{item.id==='L-6' && <div className="ml-7"><MeasInput label="グルコース濃度" unit="mg/dL" mkey="masticationScore" thr={100} m={m} setM={setMv} disabled={ro}/></div>}
                           {item.id==='L-7' && <div className="ml-7 space-y-3">
                             <p className="text-xs font-medium text-gray-600">EAT-10（嚥下スクリーニング質問票）</p>
                             <EAT10 answers={m.eatAnswers} onChange={setEat} disabled={ro}/>
@@ -4040,7 +4078,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       </div>
       {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
       {showStaff && !isLoaded && !ro && (
-        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff}/>
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff} onCancel={()=>nav(pid?{p:'history',patientId:pid,returnTo:'adult'}:{p:'home'})}/>
       )}
       {/* 入力途中の戻る警告 */}
       {showBackWarn && <UnsavedBackModal onLeave={leaveTo} onStay={()=>setShowBackWarn(false)} isEdit={!!savedId}
@@ -4084,6 +4122,9 @@ function History({patientId, returnTo}) {
           <Btn onClick={()=>nav({p:age.years<18?'pediatric':'adult',patientId})} cls="flex-1">➕ 新規評価を開始</Btn>
           {age.years<18 && assessments.some(a=>a.type==='pediatric') && (
             <Btn variant="secondary" onClick={()=>nav({p:'pediatric',patientId,mode:'retest'})} cls="flex-1">🔁 再検査（舌圧・りっぷるくんだけ）</Btn>
+          )}
+          {age.years>=18 && assessments.some(a=>a.type==='adult') && (
+            <Btn variant="secondary" onClick={()=>nav({p:'adult',patientId,mode:'retest'})} cls="flex-1">🔁 再検査（舌圧・咬合圧・湿潤度だけ）</Btn>
           )}
         </div>
         {patientId && hasTrend && (
