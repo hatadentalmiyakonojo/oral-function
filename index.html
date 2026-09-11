@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '64';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '65';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -3188,8 +3188,11 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
     const tongueStart = pv('maxTonguePressure')!=null ? snapToSpec('pedTongue', pv('maxTonguePressure')) : (tn ? snapToSpec('pedTongue', tn.mean) : '');
     setTongue3([tongueStart, tongueStart, tongueStart]); // 3回分とも開始値をプリセット
     // v58: 身長・体重に年齢平均を入れるのは廃止（実測でない値が入ると誤解のもと）。前回の実測値があるときだけ引き継ぐ
-    setHeight(pv('height')!=null ? snapToSpec('pedHeight', pv('height')) : '');
-    setWeight(pv('weight')!=null ? snapToSpec('pedWeight', pv('weight')) : '');
+    // v65: 身長・体重は年齢性別の平均を初期値として表示（院長要望）。前回の実測があればそれを優先。
+    //      触らなければ保存されない（未計測）のは他の検査値と同じ
+    const gr = growthAvg(yrs, patient.gender);
+    setHeight(pv('height')!=null ? snapToSpec('pedHeight', pv('height')) : (gr ? snapToSpec('pedHeight', gr.h) : ''));
+    setWeight(pv('weight')!=null ? snapToSpec('pedWeight', pv('weight')) : (gr ? snapToSpec('pedWeight', gr.w) : ''));
   }, [pid]);
 
   // 過去評価の読込時：各写真idをIndexedDBから取得してdataURLを充填。見つからなければ「画像なし」タイル。
@@ -3397,13 +3400,14 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                         {!isPreWeaning && item.id==='C-17' && renderTongueBlock()}
                         {item.cat==='栄養（体格）' && (
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
-                            <p className="text-xs text-gray-500 mb-2">📏 身長・体重（カウプ／ローレル指数を自動計算。実測値を入力してください）</p>
+                            <p className="text-xs text-gray-500 mb-2">📏 身長・体重（カウプ／ローレル指数を自動計算。初期値は年齢・性別の平均。実測したら上書き。触らなければ未計測として保存）</p>
                             <div className="grid grid-cols-2 gap-3">
                               <SelectNum label="身長" unit="cm" specKey="pedHeight" value={height} onChange={setHeightRO} disabled={ro}/>
                               <SelectNum label="体重" unit="kg" specKey="pedWeight" value={weight} onChange={setWeightRO} disabled={ro}/>
                             </div>
                             {bodyIndex && <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${bodyIndex.abnormal?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
                               {bodyIndex.name}: {bodyIndex.value}（{bodyIndex.label}）{bodyIndex.abnormal && ' → C項目（やせ／肥満）該当の可能性'}
+                              {!(measuredPed('height',height)&&measuredPed('weight',weight)) && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">未計測（平均値のまま・保存されません）</span>}
                             </div>}
                           </div>
                         )}
