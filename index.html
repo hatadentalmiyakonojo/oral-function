@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '66';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '67';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1324,7 +1324,13 @@ function pedTongueNorm(years){
   if(years<3) a=3;
   return { age:a, mean:PED_TONGUE_NORMS[a].mean, cutoff:PED_TONGUE_NORMS[a].cutoff };
 }
-// 成人：最大舌圧の目安（kPa）── 男性(20-59)35 / 女性(20-59)30 / 60代30 / 70歳以上20。これ未満を低舌圧とする
+// ★L-5（低舌圧）の判定・算定に使う唯一の基準値。口腔機能低下症の診断基準＝最大舌圧 30kPa未満。
+//   v67: 以前は年齢性別の参考値（男性35等）で判定していたため、公式には非該当の人がL-5に該当し、
+//        該当項目数＝算定判定が甘くなっていた。判定・スコア・印刷はすべてこの定数だけを使う。
+const ADULT_L5_CUTOFF = 30;
+// 成人：最大舌圧の年代別・性別の目安（kPa）── 男性(20-59)35 / 女性(20-59)30 / 60代30 / 70歳以上20。
+//   ★これは「同年代と比べてどうか」を患者さんに説明するための【参考値】であって、診断基準ではない。
+//   判定・算定には絶対に使わないこと（使うなら ADULT_L5_CUTOFF）。出典は未確認。
 function adultTongueCutoff(years, gender){
   if(years==null || isNaN(years)) return 30; // 年齢不明時は公式既定の30
   if(years>=70) return 20;
@@ -1387,7 +1393,7 @@ const L_PLAIN = {
 // お口の機能レーダー（7機能を基準ライン=50と比較）＆ オリジナル訓練カード
 // ═══════════════════════════════════════════════
 // 7機能の健全度スコア(0-100)。50=基準ライン。該当(弱い)は42以下/良好は56以上に寄せ視認性確保
-function computeFnScores(a, tongueCut){
+function computeFnScores(a){  // v67: 舌圧も他項目と同じく公式基準(30kPa)でスコア化
   const m = a.measurements||{};
   const checked = new Set(a.checkedLItems||[]);
   const cl = x => Math.max(0, Math.min(100, x));
@@ -1400,7 +1406,7 @@ function computeFnScores(a, tongueCut){
     {key:'L-2', name:'うるおい',   score: hi(m.oralMoisture,27)},
     {key:'L-3', name:'かむ力',     score: hi(m.biteForce, m.biteFilter?350:500)},
     {key:'L-4', name:'舌・唇の動き', score: ddk},
-    {key:'L-5', name:'舌の力',     score: hi(m.maxTonguePressure, tongueCut||30)},
+    {key:'L-5', name:'舌の力',     score: hi(m.maxTonguePressure, ADULT_L5_CUTOFF)},
     {key:'L-6', name:'かみくだく力', score: hi(m.masticationScore,100)},
     {key:'L-7', name:'飲み込む力', score: l7},
   ];
@@ -1804,8 +1810,8 @@ function measuredOnly(a){
 }
 // 保存済み評価の一覧に measuredOnly を適用（v60の移行と同じ処理。touched を持たない旧データは素通し・冪等）
 function blankUntouchedAssessments(list){ return (list||[]).map(a => measuredOnly(a)); }
-function computeMeasurementLItems(m, tongueCutoff) {
-  const tCut = tongueCutoff || 30; // 成人舌圧cut-off（年齢性別。未指定時は公式30kPa）
+function computeMeasurementLItems(m) {
+  const tCut = ADULT_L5_CUTOFF; // v67: 公式の診断基準30kPa固定（年齢性別の参考値は判定に使わない）
   const c = [];
   // 未検査の項目は NaN にして判定から外す（測っていない項目を「該当」と数えないため）
   const nv = k => isMeasured(m,k) ? parseFloat(m[k]) : NaN;
@@ -3759,18 +3765,14 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     // v66: 自動判定分を差し引く時の舌圧cut-offを、画面・印刷と同じ「患者の年齢性別の値」に揃える。
     //      以前は30固定だったため、例えば60歳未満男性（基準35）で舌圧32を測った記録では
     //      L-5が自動判定から漏れて手動チェック扱いになり、舌圧が改善してもL-5が残り続けていた。
-    const _pt = patients.find(p=>p.id===(loaded?loaded.patientId:initPid));
-    const _base = loaded || retestBase;
-    const _yrs = (_pt && _base) ? yearsAtDate(_pt.birth, _base.date) : null;
-    const _cut = adultTongueCutoff(_yrs, _pt?_pt.gender:null);
     if(retestBase){ // 再検査: 前回の手動チェック分（視診等）だけ引き継ぐ。検査由来の自動判定は今回の測定値から出し直す
       const saved = retestBase.checkedLItems||[];
-      try { const auto = computeMeasurementLItems({...EMPTY_M, ...(retestBase.measurements||{})}, _cut); return saved.filter(x=>!auto.includes(x)); }
+      try { const auto = computeMeasurementLItems({...EMPTY_M, ...(retestBase.measurements||{})}); return saved.filter(x=>!auto.includes(x)); }
       catch(e){ return saved; }
     }
     if(!loaded) return [];
     const saved = loaded.checkedLItems||[];
-    try { const auto = computeMeasurementLItems(loadedM, _cut); return saved.filter(x=>!auto.includes(x)); }
+    try { const auto = computeMeasurementLItems(loadedM); return saved.filter(x=>!auto.includes(x)); }
     catch(e){ return saved; }
   });
   const [notes,setNotes] = useState(loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
@@ -3798,7 +3800,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
 
   const patient = patients.find(p=>p.id===pid);
   const age = patient ? computeAge(patient.birth, (isLoaded && loaded) ? loaded.date : examDate) : null;
-  const tongueCut = adultTongueCutoff(age?age.years:null, patient?patient.gender:null); // 年齢性別の舌圧cut-off
+  const tongueCut = adultTongueCutoff(age?age.years:null, patient?patient.gender:null); // ★参考表示専用（同年代の目安）。判定・算定には使わない＝ADULT_L5_CUTOFF
   // 基準日は読込時=その評価日、新規=入力中の検査日
   const baseDate = isLoaded && loaded ? loaded.date : examDate;
   // 前回の評価（同一患者の成人評価のうち、基準日以前で最新。今セッションで保存した分は除く）
@@ -3840,7 +3842,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     }
     setM(merged);
   },[pid]);
-  const measL = useMemo(()=>computeMeasurementLItems(m, tongueCut),[m, tongueCut]);
+  const measL = useMemo(()=>computeMeasurementLItems(m),[m]);
   const allL = useMemo(()=>[...new Set([...measL,...manualL])],[measL,manualL]);
   const diag = useMemo(()=>{
     const cnt=allL.length; const q_=cnt>=3;
@@ -3934,7 +3936,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   );
   const renderTongueBlock = () => (
 <div className="ml-7 space-y-2">
-                            <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／目安≧{tongueCut}kPa）{prevA&&prevA.measurements&&prevA.measurements.maxTonguePressure?`／前回 ${prevA.measurements.maxTonguePressure}kPa`:''}</p>
+                            <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／基準 {ADULT_L5_CUTOFF}kPa未満で低舌圧{tongueCut!==ADULT_L5_CUTOFF?`・同年代の目安 ${tongueCut}kPa`:''}）{prevA&&prevA.measurements&&prevA.measurements.maxTonguePressure?`／前回 ${prevA.measurements.maxTonguePressure}kPa`:''}</p>
                             <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
                             <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
@@ -3942,9 +3944,10 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                                 <SelectNum key={i} label={`${i+1}回目`} unit="kPa" specKey="maxTonguePressure" value={(m.tonguePres3||['','',''])[i]} onChange={v=>setTongue3(i,v)} disabled={ro} free measured={isMeasured(m,'maxTonguePressure')}/>
                               ))}
                             </div>
-                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.maxTonguePressure===''||!isMeasured(m,'maxTonguePressure'))?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<tongueCut?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
+                            <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.maxTonguePressure===''||!isMeasured(m,'maxTonguePressure'))?'bg-gray-50 text-gray-500':parseFloat(m.maxTonguePressure)<ADULT_L5_CUTOFF?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
                               平均（測定値）：<span className="font-bold text-base">{m.maxTonguePressure!==''?m.maxTonguePressure:'—'}</span> kPa{(()=>{const n=(m.tonguePres3||[]).map(parseFloat).filter(x=>!isNaN(x)).length;return n>0&&n<3?`（${n}回入力）`:'';})()}{!isMeasured(m,'maxTonguePressure') && <span className="ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5">{m.maxTonguePressure===''?'未検査':'未検査（初期値のまま・保存されません）'}</span>}
-                              {isMeasured(m,'maxTonguePressure') && parseFloat(m.maxTonguePressure)<tongueCut && <span className="ml-2 text-xs">⚠ 目安未満（＜{tongueCut}kPa）→ 低舌圧</span>}
+                              {isMeasured(m,'maxTonguePressure') && parseFloat(m.maxTonguePressure)<ADULT_L5_CUTOFF && <span className="ml-2 text-xs">⚠ {ADULT_L5_CUTOFF}kPa未満 → 低舌圧（L-5該当）</span>}
+                              {isMeasured(m,'maxTonguePressure') && parseFloat(m.maxTonguePressure)>=ADULT_L5_CUTOFF && parseFloat(m.maxTonguePressure)<tongueCut && <span className="ml-2 text-xs font-normal text-gray-500">（基準は満たしていますが、同年代の目安 {tongueCut}kPa より低めです）</span>}
                             </div>
                           </div>
   );
@@ -4060,8 +4063,8 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
             <div className="bg-white rounded-2xl shadow-sm p-5">
               <h2 className="font-semibold text-gray-800 mb-1">📊 お口の機能バランス{prevA && <span className="text-xs font-normal text-gray-400 ml-2">前回（{formatDate(prevA.date)}）との比較</span>}</h2>
               <div className="flex justify-center">
-                <FnRadar scores={computeFnScores({measurements:m, checkedLItems:allL}, tongueCut)}
-                  prev={prevA ? computeFnScores(prevA, tongueCut) : null}/>
+                <FnRadar scores={computeFnScores({measurements:m, checkedLItems:allL})}
+                  prev={prevA ? computeFnScores(prevA) : null}/>
               </div>
             </div>
             <div className="bg-white rounded-2xl shadow-sm p-5 space-y-3">
@@ -4397,10 +4400,10 @@ function PrintPreview({assessmentId}) {
         : isPlan
           ? (isPed
               ? <PlanPediatric a={a} patient={patient} ageYears={age.years} prev={prevA} clinic={clinic}/>
-              : <PlanAdult a={a} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA} clinic={clinic}/>)
+              : <PlanAdult a={a} prev={prevA} clinic={clinic}/>)
           : (isPed
               ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name} prev={prevA}/>
-              : <PrintAdult a={a} patientName={patient.name} tongueCut={adultTongueCutoff(age.years, patient.gender)} prev={prevA}/>)}
+              : <PrintAdult a={a} patientName={patient.name} prev={prevA}/>)}
       {/* 医院フッター：左下にロゴ＋医院名・住所・電話、右下に日付（アプリ名は印字しない） */}
       <div style={{marginTop:'14px',paddingTop:'8px',borderTop:'1px solid #e5e7eb',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
@@ -4547,12 +4550,12 @@ function PrintPediatric({a, ageYears, patientName, prev}) {
   );
 }
 
-function PrintAdult({a, patientName, tongueCut, prev}) {
+function PrintAdult({a, patientName, prev}) {
   const {diagnosis} = a;
   const ngCount = diagnosis?.lItemCount||0;
   const trainings = prescribeAdultTrainings(a.checkedLItems||[], a.measurements||{});
-  const scores = computeFnScores(a, tongueCut);
-  const prevScores = prev ? computeFnScores(prev, tongueCut) : null;
+  const scores = computeFnScores(a);
+  const prevScores = prev ? computeFnScores(prev) : null;
   return (
     <div>
       <div style={{background:diagnosis?.qualifies?'#fff1f2':'#f0fdf4',border:`2px solid ${diagnosis?.qualifies?'#fca5a5':'#86efac'}`,borderRadius:'12px',padding:'12px',textAlign:'center',marginBottom:'12px'}}>
@@ -4686,7 +4689,7 @@ function PlanFooter({a, clinic, trainingsLabel}){
 const PT_TH = {border:'1px solid #9ca3af',padding:'3px 6px',background:'#f3f4f6',fontSize:'10px',fontWeight:'600',color:'#374151',textAlign:'left'};
 const PT_TD = {border:'1px solid #9ca3af',padding:'3px 6px',fontSize:'10.5px',color:'#111'};
 
-function PlanAdult({a, tongueCut, prev, clinic}){
+function PlanAdult({a, prev, clinic}){
   const m = a.measurements||{};
   const pm = prev ? (prev.measurements||{}) : null;
   const checked = new Set(a.checkedLItems||[]);
@@ -4696,7 +4699,7 @@ function PlanAdult({a, tongueCut, prev, clinic}){
     {id:'L-2', name:'口腔乾燥', test:'口腔湿潤度（ムーカス）'+(m.saxonTest?` / サクソン ${m.saxonTest}g`:''), val:v(m.oralMoisture), pv:pm?v(pm.oralMoisture):null, crit:'27未満'},
     {id:'L-3', name:'咬合力低下', test:`咬合力 Oramo-bf${m.biteForce?`（フィルタ${m.biteFilter?'あり':'なし'}）`:''} / 残存${v(m.remainingTeeth,'本')}`, val:v(m.biteForce,'N'), pv:pm?v(pm.biteForce,'N'):null, crit:m.biteFilter?'350N未満':'500N未満'},
     {id:'L-4', name:'舌口唇運動機能低下', test:'オーラルディアドコキネシス', val:(m.ddk_pa||m.ddk_ta||m.ddk_ka)?`パ${m.ddk_pa||'—'} タ${m.ddk_ta||'—'} カ${m.ddk_ka||'—'}`:'未検査', pv:pm?((pm.ddk_pa||pm.ddk_ta||pm.ddk_ka)?`パ${pm.ddk_pa||'—'} タ${pm.ddk_ta||'—'} カ${pm.ddk_ka||'—'}`:'未検査'):null, crit:'いずれか6回/秒未満'},
-    {id:'L-5', name:'低舌圧', test:'舌圧検査（JMS舌圧計）', val:v(m.maxTonguePressure,'kPa'), pv:pm?v(pm.maxTonguePressure,'kPa'):null, crit:`${tongueCut||30}kPa未満`},
+    {id:'L-5', name:'低舌圧', test:'舌圧検査（JMS舌圧計）', val:v(m.maxTonguePressure,'kPa'), pv:pm?v(pm.maxTonguePressure,'kPa'):null, crit:`${ADULT_L5_CUTOFF}kPa未満`},
     {id:'L-6', name:'咀嚼機能低下', test:'グルコース含有グミ法', val:v(m.masticationScore,'mg/dL'), pv:pm?v(pm.masticationScore,'mg/dL'):null, crit:'100mg/dL未満'},
     {id:'L-7', name:'嚥下機能低下', test:'EAT-10'+(m.rsst?` / RSST ${m.rsst}回`:''), val:v(m.eatScore,'点'), pv:pm?v(pm.eatScore,'点'):null, crit:'3点以上'},
   ];
@@ -4933,16 +4936,16 @@ function runSelfTests(){
   const baseM = {touched:[], tciScore:'50', oralMoisture:'29', biteForce:'600', biteFilter:true,
                  remainingTeeth:'24', ddk_pa:'6', ddk_ta:'6', ddk_ka:'6', maxTonguePressure:'35',
                  masticationScore:'', eatScore:'', rsst:'', saxonTest:'', bacteriaLevel:''};
-  t('L判定: 初期値のまま触っていなければ該当なし', computeMeasurementLItems(baseM,30), []);
-  t('L判定: TCI50%を実測したらL-1', computeMeasurementLItems({...baseM,touched:['tciScore']},30), ['L-1']);
-  t('L判定: 湿潤度26はL-2', computeMeasurementLItems({...baseM,touched:['oralMoisture'],oralMoisture:'26'},30), ['L-2']);
-  t('L判定: 湿潤度27ちょうどは該当しない', computeMeasurementLItems({...baseM,touched:['oralMoisture'],oralMoisture:'27'},30), []);
-  t('L判定: 咬合力300(フィルタあり)はL-3', computeMeasurementLItems({...baseM,touched:['biteForce'],biteForce:'300'},30), ['L-3']);
-  t('L判定: 咬合力400(フィルタあり)は該当しない', computeMeasurementLItems({...baseM,touched:['biteForce'],biteForce:'400'},30), []);
-  t('L判定: DDK5.5はL-4', computeMeasurementLItems({...baseM,touched:['ddk_pa'],ddk_pa:'5.5'},30), ['L-4']);
-  t('L判定: 舌圧25(cut-off30)はL-5', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'25'},30), ['L-5']);
-  t('L判定: EAT-10が3点でL-7', computeMeasurementLItems({...baseM,touched:['eatScore'],eatScore:'3'},30), ['L-7']);
-  t('L判定: 旧データ(touched無し)は従来どおりTCI50でL-1', computeMeasurementLItems({tciScore:'50',biteFilter:true},30), ['L-1']);
+  t('L判定: 初期値のまま触っていなければ該当なし', computeMeasurementLItems(baseM), []);
+  t('L判定: TCI50%を実測したらL-1', computeMeasurementLItems({...baseM,touched:['tciScore']}), ['L-1']);
+  t('L判定: 湿潤度26はL-2', computeMeasurementLItems({...baseM,touched:['oralMoisture'],oralMoisture:'26'}), ['L-2']);
+  t('L判定: 湿潤度27ちょうどは該当しない', computeMeasurementLItems({...baseM,touched:['oralMoisture'],oralMoisture:'27'}), []);
+  t('L判定: 咬合力300(フィルタあり)はL-3', computeMeasurementLItems({...baseM,touched:['biteForce'],biteForce:'300'}), ['L-3']);
+  t('L判定: 咬合力400(フィルタあり)は該当しない', computeMeasurementLItems({...baseM,touched:['biteForce'],biteForce:'400'}), []);
+  t('L判定: DDK5.5はL-4', computeMeasurementLItems({...baseM,touched:['ddk_pa'],ddk_pa:'5.5'}), ['L-4']);
+  t('L判定: 舌圧25(cut-off30)はL-5', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'25'}), ['L-5']);
+  t('L判定: EAT-10が3点でL-7', computeMeasurementLItems({...baseM,touched:['eatScore'],eatScore:'3'}), ['L-7']);
+  t('L判定: 旧データ(touched無し)は従来どおりTCI50でL-1', computeMeasurementLItems({tciScore:'50',biteFilter:true}), ['L-1']);
 
   // --- 年齢・基準値 ---
   t('舌圧cut-off: 75歳', adultTongueCutoff(75,'male'), 20);
@@ -5026,7 +5029,7 @@ function runSelfTests(){
   t('検査間隔: 未検査の記録は前回に数えない（舌圧の前回は6/1）', lastTestedDate(hist,'p','adult',x=>(x.measurements||{}).maxTonguePressure,null), '2026-06-01');
   t('検査間隔: 一度も測っていない咬合力は前回なし', lastTestedDate(hist,'p','adult',x=>(x.measurements||{}).biteForce,null), null);
   // 患者配布用レーダー: 未検査は measured=false（「良好」と書かない根拠）
-  const fs = computeFnScores(measuredOnly(aduUntouched), 30);
+  const fs = computeFnScores(measuredOnly(aduUntouched));
   t('レーダー: 触った湿潤度は measured', fs.find(x=>x.key==='L-2').measured, true);
   t('レーダー: 触っていない咬合力は unmeasured', fs.find(x=>x.key==='L-3').measured, false);
   // --- v60: 保存時の空欄化（3回測定の欄・舌マップも空に／実測は残る／旧データは素通し／冪等） ---
@@ -5066,10 +5069,22 @@ function runSelfTests(){
   t('v66: 未検査のEAT-10は回答も残さない', (measuredOnly(eatA).measurements.eatAnswers||[]).filter(x=>x!=null).length, 0);
   const eatB = {type:'adult', measurements:{...baseM, touched:['eatScore'], eatAnswers:[3,0,0,0,0,0,0,0,0,0], eatScore:'3'}};
   t('v66: 実測したEAT-10の回答は残る', measuredOnly(eatB).measurements.eatAnswers[0], 3);
-  // ⑤ 舌圧cut-offは年齢性別で決まる（復元時も同じ値を使う）
-  t('v66: 60歳未満男性のcut-offは35', adultTongueCutoff(55,'male'), 35);
-  t('v66: cut-off35なら舌圧32はL-5', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'32'}, adultTongueCutoff(55,'male')), ['L-5']);
-  t('v66: cut-off35なら舌圧40は該当しない', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'40'}, adultTongueCutoff(55,'male')), []);
+  // ⑤ L-5の判定は公式基準30kPa固定。年齢性別の値は画面の参考表示にしか使わない（v67）
+  t('v67: L-5の基準は30kPa', ADULT_L5_CUTOFF, 30);
+  t('v67: 舌圧29はL-5', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'29'}), ['L-5']);
+  t('v67: 舌圧30ちょうどは該当しない', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'30'}), []);
+  t('v67: 60歳未満男性でも舌圧32は該当しない（参考値35で判定しない）', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'32'}), []);
+  t('v67: 70歳以上でも舌圧25はL-5（参考値20で判定しない）', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'25'}), ['L-5']);
+  t('v67: 参考値そのものは残っている(男性55歳=35)', adultTongueCutoff(55,'male'), 35);
+  t('v67: 参考値そのものは残っている(70歳=20)', adultTongueCutoff(72,'male'), 20);
+  // レーダーも他項目と同じく「その項目の公式基準ちょうど」で同じ点になる＝舌圧の基準が30である証明
+  tOk('v67: レーダーの舌の力も30基準（湿潤度27と同点）', (()=>{
+    const fs = computeFnScores({measurements:{maxTonguePressure:'30', oralMoisture:'27'},checkedLItems:[]});
+    return fs.find(x=>x.key==='L-5').score === fs.find(x=>x.key==='L-2').score;
+  })());
+  // 舌圧45なら 45/30*50=75点。参考値35で割っていたら64点になるので、30で割っている証拠になる
+  t('v67: レーダーは舌圧45で75点（30で割っている）',
+    computeFnScores({measurements:{maxTonguePressure:'45'},checkedLItems:[]}).find(x=>x.key==='L-5').score, 75);
   // ⑨ 前回検査に「その記録より後の検査」を選ばない
   t('v66: 日付比較(同日は含む)', onOrBefore('2026-04-01','2026-04-01'), true);
   t('v66: 日付比較(未来は除く)', onOrBefore('2026-07-01','2026-04-01'), false);
