@@ -710,7 +710,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '65';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '66';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -729,14 +729,21 @@ const migrations = [
       ['ddk_pa','ddk_ta','ddk_ka'].forEach(k => { if(nm[k]!=null) nm[k] = fix(nm[k]); });
       return {...a, measurements: nm};
     });
-    save('assessments', asm);
+    if(!save('assessments', asm)) throw new Error('assessments の保存に失敗（DDK正規化）'); // v66: 失敗を握りつぶすと未移行のまま完了印が付く
   },
 ];
 // 起動時に一度だけ実行（Reactのrender前）。冪等。失敗時は印を付けず次回起動で再試行。
 // (v2→v3) v57〜v59で保存した記録には、触っていない項目の初期値（咬合力600等）が残っている。
 //         touched を持つ記録だけ、未検査の項目を空欄にする。旧データ（touched無し）は触らない。冪等。
 migrations.push((load, save) => {
-  save('assessments', blankUntouchedAssessments(load('assessments', [])));
+  // v66: load は読み取り失敗時も fallback([]) を返すため、そのまま保存すると全記録を空で上書きしてしまう。
+  //      生の値を見て「データ無し」と「読めなかった」を区別し、読めない/書けない時は例外で中断する（完了印を付けない）。
+  let raw = null;
+  try { raw = localStorage.getItem('assessments'); } catch(e){ throw new Error('assessments を読めませんでした'); }
+  if(raw==null) return;                     // まだ1件も保存していない端末＝何もしない
+  const cur = load('assessments', null);
+  if(!Array.isArray(cur)) throw new Error('assessments が壊れているため移行を中止します');
+  if(!save('assessments', blankUntouchedAssessments(cur))) throw new Error('assessments の保存に失敗（未検査項目の空欄化）');
 });
 function runMigrations(){
   let from = load('dataSchemaVersion', LEGACY_SCHEMA_VERSION);
@@ -767,8 +774,12 @@ function initVersionMarker(){
 function calMonthDiff(d1, d2){ const a=new Date(d1), b=new Date(d2);
   return (b.getFullYear()*12+b.getMonth()) - (a.getFullYear()*12+a.getMonth()); }
 // 指定の検査値が入力されている直近の過去評価日（excludeId=今セッションの保存分を除外）
-function lastTestedDate(assessments, patientId, type, getter, excludeId){
-  const hit = assessments.filter(x=>x.patientId===patientId && x.type===type && x.id!==excludeId)
+// 日付の前後比較（ISOとYYYY-MM-DDが混在するので先頭10文字で比較）。基準日が無ければ全件通す
+function onOrBefore(d, base){ if(!base) return true; return String(d||'').slice(0,10) <= String(base).slice(0,10); }
+// v66: beforeDate を足した。これが無いと、過去の記録を開いたときに「その記録より後の検査」が
+//      前回検査として選ばれ、3か月警告が未来の検査を基準に出ていた。
+function lastTestedDate(assessments, patientId, type, getter, excludeId, beforeDate){
+  const hit = assessments.filter(x=>x.patientId===patientId && x.type===type && x.id!==excludeId && onOrBefore(x.date, beforeDate))
     .filter(x=>{const v=getter(measuredOnly(x)); return v!=null && v!=='';})  // v59: 未検査は数えない
     .sort((x,y)=>new Date(y.date)-new Date(x.date))[0];
   return hit ? hit.date : null; }
@@ -1750,6 +1761,10 @@ function markTouched(prev, ...keys){
   for(const k of keys) if(t.indexOf(k)<0) t.push(k);
   return t;
 }
+// v66: touched を持たない旧データについて「実測だったキー」を値の有無から復元する。
+//   これが無いと、旧記録を1項目でも編集した瞬間に touched=[そのキー] になり、
+//   保存時の measuredOnly で他の実測値がまとめて空欄にされて消える（v57からの不具合）。
+function restoreTouched(src, keys){ return (keys||[]).filter(k => src && src[k]!=null && src[k]!==''); }
 function isMeasured(m, key){
   if(!m) return false;
   const v = m[key];
@@ -1774,6 +1789,7 @@ function measuredOnly(a){
     if(!isMeasured(m,'oralMoisture'))      mm.moist3      = ['','',''];
     if(!isMeasured(m,'maxTonguePressure')) mm.tonguePres3 = ['','',''];
     if(!isMeasured(m,'tciScore'))          mm.tciZones    = null;
+    if(!isMeasured(m,'eatScore'))          mm.eatAnswers  = Array(10).fill(null); // v66: 点数だけ空にして回答が残ると、次回1問触った時に前回分が合算される
     return {...a, measurements:mm};
   }
   if(a.type==='pediatric'){
@@ -1832,8 +1848,10 @@ function useStore() {
     const a=assessments.filter(x=>x.patientId!==id); setAssessments(a); save('assessments',a);
     addTombstone('patient',id); removed.forEach(r=>addTombstone('assessment',r.id));
   };
-  const addAssessment = a => { const x=stamp(a); const n=[...assessments,x]; setAssessments(n); return save('assessments',n,true); };
-  const updateAssessment = a => { const x=stamp(a); const n=assessments.map(o=>o.id===x.id?x:o); setAssessments(n); return save('assessments',n,true); };
+  // v66: 保存が成功してから画面の一覧に反映する。先に setAssessments すると、保存失敗後にもう一度
+  //       保存した時に「失敗した分」と「やり直した分」が別IDで並び、記録が二重にできていた。
+  const addAssessment = a => { const x=stamp(a); const n=[...assessments,x]; const ok=save('assessments',n,true); if(ok) setAssessments(n); return ok; };
+  const updateAssessment = a => { const x=stamp(a); const n=assessments.map(o=>o.id===x.id?x:o); const ok=save('assessments',n,true); if(ok) setAssessments(n); return ok; };
   const deleteAssessment = id => {
     // 対象評価が参照する写真をIndexedDBから削除（fire-and-forget）
     const tgt = assessments.find(x=>x.id===id);
@@ -3083,7 +3101,9 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const [notes, setNotes] = useState(loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
   const [savedId, setSavedId] = useState(assessmentId||null); // 読込時は savedId=評価ID → 保存は updateAssessment
   const [collapsed, setCollapsed] = useState(new Set());
-  const [phaseOverride, setPhaseOverride] = useState(loaded?(loaded.phase==='pre'?'pre':'post'):null); // null=年齢で自動 / 'pre' / 'post'
+  // v66: 再検査は前回と同じ別紙に固定する。C項目IDは別紙1と別紙2で意味が違う（例: C-3は別紙1＝舌小帯異常／別紙2＝咀嚼に影響するう蝕）ため、
+  //      年齢で自動判定させると、引き継いだチェックが別の所見に化けていた。手動で切り替えればチェックはクリアされる。
+  const [phaseOverride, setPhaseOverride] = useState(loaded?(loaded.phase==='pre'?'pre':'post'):(retestBase?(retestBase.phase==='pre'?'pre':'post'):null)); // null=年齢で自動 / 'pre' / 'post'
   const [phaseSwitch, setPhaseSwitch] = useState(null); // 別紙切替の確認モーダル対象（'pre'/'post'/'auto'）
   // 担当者（評価時に選択）。読込時は評価データから復元
   const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
@@ -3100,7 +3120,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const [photos, setPhotos] = useState(loaded?(loaded.photos||[]).map(p=>({...p})):[]);
   const [deletedPhotoIds, setDeletedPhotoIds] = useState([]); // 保存済みから削除されたid（doSave時にIDBから削除）
   // v57: 実際に検査した項目（初期値のままの「未検査」と実測を区別する）。旧データはnull＝従来どおり値の有無で判定
-  const [touched, setTouched] = useState(loaded ? (Array.isArray(loaded.touched)?loaded.touched:null) : []);
+  const [touched, setTouched] = useState(loaded ? (Array.isArray(loaded.touched)?loaded.touched:restoreTouched(loaded, PED_MEAS_KEYS)) : []); // v66: 旧データは保存値＝実測として復元（編集で他項目が消えるのを防ぐ）
   const markPed = k => setTouched(p => Array.isArray(p) ? (p.indexOf(k)>=0?p:[...p,k]) : [k]);
   const measuredPed = (k, v) => (v!=='' && v!=null) && (!Array.isArray(touched) || touched.indexOf(k)>=0);
   // 入力内容が変わったら「未保存の変更あり」にする（初回マウントは除く）
@@ -3163,17 +3183,20 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
     else setPhaseOverride(t==='auto'?null:t);
   };
 
-  // 前回の評価（同一患者の小児評価のうち最新。今セッションで保存した分は除く）
+  // 基準日は読込時=その評価日、新規=入力中の検査日
+  const baseDate = isLoaded && loaded ? loaded.date : examDate;
+  // 前回の評価（同一患者の小児評価のうち、基準日以前で最新。今セッションで保存した分は除く）
+  //   v66: 日付で絞らないと、過去の記録を開いたときに「その記録より後の検査」が前回として出ていた
   const prevPed = useMemo(()=>{
     return assessments
-      .filter(x=>x.patientId===pid && x.type==='pediatric' && x.id!==savedId)
+      .filter(x=>x.patientId===pid && x.type==='pediatric' && x.id!==savedId && onOrBefore(x.date, baseDate))
       .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
-  },[assessments, pid, savedId]);
+  },[assessments, pid, savedId, baseDate]);
 
-  // 検査間隔3か月警告（前回検査値が入った直近評価日から3暦月未満なら算定不可）。基準日は読込時=評価日、新規=本日
-  const baseDate = isLoaded && loaded ? loaded.date : examDate;
-  const warnLip = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.lipClosureForce, savedId), baseDate), [assessments, pid, savedId]);
-  const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.maxTonguePressure, savedId), baseDate), [assessments, pid, savedId]);
+  // 検査間隔3か月警告（前回検査値が入った直近評価日から3暦月未満なら算定不可）
+  //   v66: 依存配列に baseDate を追加。検査日を変更しても警告が更新されなかった
+  const warnLip = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.lipClosureForce, savedId, baseDate), baseDate), [assessments, pid, savedId, baseDate]);
+  const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'pediatric', a=>a.maxTonguePressure, savedId, baseDate), baseDate), [assessments, pid, savedId, baseDate]);
 
   // 患者が決まったら、検査値の初期値をセット：前回値があれば前回値、なければ年齢・性別の平均値
   // ※過去評価の読み込み時（isLoaded）はプリセットしない（復元値を上書きしないため）
@@ -3249,7 +3272,9 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
     // 写真のIDB反映（fire-and-forget・同期シグネチャ維持）：新規追加分をput、削除分をdelete。
     const toPut = photos.filter(p=>p.dataURL && !p.missing).map(p=>({id:p.id, dataURL:p.dataURL}));
     const toDel = deletedPhotoIds.slice();
-    if(toPut.length || toDel.length){
+    // v66: 評価の保存に失敗した時は写真に触らない。以前は失敗しても削除だけ走り、
+    //      記録には写真の参照が残るのに画像本体だけ消える状態になっていた。
+    if(okSave && (toPut.length || toDel.length)){
       (async()=>{
         try {
           for(const p of toPut){ await putPhoto(p.id, p.dataURL); }
@@ -3713,9 +3738,11 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     const base = {...EMPTY_M, ...lm};
     if(!Array.isArray(lm.moist3))      base.moist3      = [lm.oralMoisture||'', '', ''];
     if(!Array.isArray(lm.tonguePres3)) base.tonguePres3 = [lm.maxTonguePressure||'', '', ''];
-    // v57: touched を持たない旧データは「未検査情報なし」のまま扱う（EMPTY_Mの空配列で上書きすると
-    //      実際には測定済みの記録が全部「未検査」と表示されてしまう）
-    if(!Array.isArray(lm.touched)) delete base.touched;
+    // v66: touched を持たない旧データは「保存されている値＝実測」として touched を復元する。
+    //      以前は delete していたが、それだと1項目でも編集した瞬間に touched=[そのキー] になり、
+    //      保存時の measuredOnly で他の実測値がまとめて空欄にされて消えていた。
+    //      EMPTY_M の初期値ではなく、保存データ lm にある値だけを実測とみなす。
+    if(!Array.isArray(lm.touched)) base.touched = restoreTouched(lm, ADULT_MEAS_KEYS);
     return base;
   })() : null;
   // v63: 再検査モード（3か月ごとの再評価＝舌圧・咬合圧・湿潤度＝点数のある3検査だけ入力）。前回の成人記録を引き継いで新しい記録を作る
@@ -3729,14 +3756,21 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const [m,setM] = useState(loadedM||{...EMPTY_M});
   // 手動L項目の復元：保存済み checkedLItems から自動判定分（measL）を除いた差分。算出不能時は全件をそのまま手動扱い
   const [manualL,setManualL] = useState(()=>{
+    // v66: 自動判定分を差し引く時の舌圧cut-offを、画面・印刷と同じ「患者の年齢性別の値」に揃える。
+    //      以前は30固定だったため、例えば60歳未満男性（基準35）で舌圧32を測った記録では
+    //      L-5が自動判定から漏れて手動チェック扱いになり、舌圧が改善してもL-5が残り続けていた。
+    const _pt = patients.find(p=>p.id===(loaded?loaded.patientId:initPid));
+    const _base = loaded || retestBase;
+    const _yrs = (_pt && _base) ? yearsAtDate(_pt.birth, _base.date) : null;
+    const _cut = adultTongueCutoff(_yrs, _pt?_pt.gender:null);
     if(retestBase){ // 再検査: 前回の手動チェック分（視診等）だけ引き継ぐ。検査由来の自動判定は今回の測定値から出し直す
       const saved = retestBase.checkedLItems||[];
-      try { const auto = computeMeasurementLItems({...EMPTY_M, ...(retestBase.measurements||{})}, adultTongueCutoff(null,null)); return saved.filter(x=>!auto.includes(x)); }
+      try { const auto = computeMeasurementLItems({...EMPTY_M, ...(retestBase.measurements||{})}, _cut); return saved.filter(x=>!auto.includes(x)); }
       catch(e){ return saved; }
     }
     if(!loaded) return [];
     const saved = loaded.checkedLItems||[];
-    try { const auto = computeMeasurementLItems(loadedM, adultTongueCutoff(null,null)); return saved.filter(x=>!auto.includes(x)); }
+    try { const auto = computeMeasurementLItems(loadedM, _cut); return saved.filter(x=>!auto.includes(x)); }
     catch(e){ return saved; }
   });
   const [notes,setNotes] = useState(loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
@@ -3765,18 +3799,21 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const patient = patients.find(p=>p.id===pid);
   const age = patient ? computeAge(patient.birth, (isLoaded && loaded) ? loaded.date : examDate) : null;
   const tongueCut = adultTongueCutoff(age?age.years:null, patient?patient.gender:null); // 年齢性別の舌圧cut-off
-  // 前回の評価（同一患者の成人評価のうち最新。今セッションで保存した分は除く）
+  // 基準日は読込時=その評価日、新規=入力中の検査日
+  const baseDate = isLoaded && loaded ? loaded.date : examDate;
+  // 前回の評価（同一患者の成人評価のうち、基準日以前で最新。今セッションで保存した分は除く）
+  //   v66: 日付で絞らないと、過去の記録を開いたときに「その記録より後の検査」が前回として出ていた（印刷側は過去限定で不一致だった）
   const prevA = useMemo(()=>{
     return assessments
-      .filter(x=>x.patientId===pid && x.type==='adult' && x.id!==savedId)
+      .filter(x=>x.patientId===pid && x.type==='adult' && x.id!==savedId && onOrBefore(x.date, baseDate))
       .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
-  },[assessments, pid, savedId]);
+  },[assessments, pid, savedId, baseDate]);
 
   // 検査間隔3か月警告（舌圧・咬合圧・口腔粘膜湿潤度。前回検査値が入った直近評価日から3暦月未満なら算定不可）
-  const baseDate = isLoaded && loaded ? loaded.date : examDate;
-  const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).maxTonguePressure, savedId), baseDate), [assessments, pid, savedId]);
-  const warnBite = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).biteForce, savedId), baseDate), [assessments, pid, savedId]);
-  const warnMoist = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).oralMoisture, savedId), baseDate), [assessments, pid, savedId]);
+  //   v66: 依存配列に baseDate を追加。担当者モーダルで検査日を変えても警告が更新されなかった
+  const warnTongue = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).maxTonguePressure, savedId, baseDate), baseDate), [assessments, pid, savedId, baseDate]);
+  const warnBite = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).biteForce, savedId, baseDate), baseDate), [assessments, pid, savedId, baseDate]);
+  const warnMoist = useMemo(()=>testIntervalWarn(lastTestedDate(assessments, pid, 'adult', a=>(a.measurements||{}).oralMoisture, savedId, baseDate), baseDate), [assessments, pid, savedId, baseDate]);
   // 患者が決まったら、前回の検査値をプリセット（再評価の入力を高速化）。前回が無ければ既定値のまま
   // ※過去評価の読み込み時（isLoaded）はプリセットしない（復元値を上書きしないため）
   useEffect(()=>{
@@ -3787,6 +3824,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     for(const k in pm){
       const v = pm[k];
       if(k==='touched') continue;
+      if(k==='eatAnswers') continue; // v66: EAT-10は毎回聞き直す問診。前回の回答を持ち越すと今回の合計に混ざる
       if(v==null || v==='') continue;
       if(Array.isArray(v) && v.every(x=>x==='' || x==null)) continue;
       merged[k] = v;
@@ -3830,7 +3868,8 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const setTciZones = z => { if(ro) return; setM(p=>({...p, tciZones:z, tciScore: z ? String(Math.round(z.reduce((a,b)=>a+b,0)/18*100)) : '', touched:markTouched(p,'tciScore')})); };
   // EAT-10：質問iの回答を更新し、合計をeatScoreに自動反映
   const setEat = (i,v) => { if(ro) return; setM(p=>{
-    const arr=[...(p.eatAnswers||Array(10).fill(null))]; arr[i]=v;
+    // v66: 今回まだ触っていない＝画面に残っているのは表示用の回答なので捨てる（3回測定と同じ方式）
+    const arr = isMeasured(p,'eatScore') ? [...(p.eatAnswers||Array(10).fill(null))] : Array(10).fill(null); arr[i]=v;
     const any=arr.some(x=>x!=null); const total=arr.reduce((s,x)=>s+(x||0),0);
     return {...p, eatAnswers:arr, eatScore: any?String(total):'', touched:markTouched(p,'eatScore')};
   }); };
@@ -4655,7 +4694,7 @@ function PlanAdult({a, tongueCut, prev, clinic}){
   const rows = [
     {id:'L-1', name:'口腔衛生状態不良', test:'TCI（舌苔の付着度）', val:v(m.tciScore,'%'), pv:pm?v(pm.tciScore,'%'):null, crit:'50%以上'},
     {id:'L-2', name:'口腔乾燥', test:'口腔湿潤度（ムーカス）'+(m.saxonTest?` / サクソン ${m.saxonTest}g`:''), val:v(m.oralMoisture), pv:pm?v(pm.oralMoisture):null, crit:'27未満'},
-    {id:'L-3', name:'咬合力低下', test:`咬合力 Oramo-bf（フィルタ${m.biteFilter?'あり':'なし'}）/ 残存${v(m.remainingTeeth,'本')}`, val:v(m.biteForce,'N'), pv:pm?v(pm.biteForce,'N'):null, crit:m.biteFilter?'350N未満':'500N未満'},
+    {id:'L-3', name:'咬合力低下', test:`咬合力 Oramo-bf${m.biteForce?`（フィルタ${m.biteFilter?'あり':'なし'}）`:''} / 残存${v(m.remainingTeeth,'本')}`, val:v(m.biteForce,'N'), pv:pm?v(pm.biteForce,'N'):null, crit:m.biteFilter?'350N未満':'500N未満'},
     {id:'L-4', name:'舌口唇運動機能低下', test:'オーラルディアドコキネシス', val:(m.ddk_pa||m.ddk_ta||m.ddk_ka)?`パ${m.ddk_pa||'—'} タ${m.ddk_ta||'—'} カ${m.ddk_ka||'—'}`:'未検査', pv:pm?((pm.ddk_pa||pm.ddk_ta||pm.ddk_ka)?`パ${pm.ddk_pa||'—'} タ${pm.ddk_ta||'—'} カ${pm.ddk_ka||'—'}`:'未検査'):null, crit:'いずれか6回/秒未満'},
     {id:'L-5', name:'低舌圧', test:'舌圧検査（JMS舌圧計）', val:v(m.maxTonguePressure,'kPa'), pv:pm?v(pm.maxTonguePressure,'kPa'):null, crit:`${tongueCut||30}kPa未満`},
     {id:'L-6', name:'咀嚼機能低下', test:'グルコース含有グミ法', val:v(m.masticationScore,'mg/dL'), pv:pm?v(pm.masticationScore,'mg/dL'):null, crit:'100mg/dL未満'},
@@ -4855,10 +4894,15 @@ function App() {
   );
 }
 
-runMigrations();       // 保存データの形を現行版へ（render前・データ読込前に一度だけ）
-initVersionMarker();   // 新規端末の更新案内抑止マーカー
-// 保存データをiOS等のストレージ自動消去から守るため「永続化」を要求（対応ブラウザのみ・失敗は無視）
-(async()=>{ try{ if(navigator.storage && navigator.storage.persist){ const ok=navigator.storage.persisted?await navigator.storage.persisted():false; if(!ok) await navigator.storage.persist(); } }catch(e){} })();
+// v66: セルフテスト画面は「保存データには触れていません」と表示するので、移行も永続化要求も走らせない。
+//      以前は selftest=1 でも起動時の移行が先に実行され、表示と実際の動作が食い違っていた。
+const IS_SELFTEST = /[?&]selftest=1/.test(location.search);
+if(!IS_SELFTEST){
+  runMigrations();       // 保存データの形を現行版へ（render前・データ読込前に一度だけ）
+  initVersionMarker();   // 新規端末の更新案内抑止マーカー
+  // 保存データをiOS等のストレージ自動消去から守るため「永続化」を要求（対応ブラウザのみ・失敗は無視）
+  (async()=>{ try{ if(navigator.storage && navigator.storage.persist){ const ok=navigator.storage.persisted?await navigator.storage.persisted():false; if(!ok) await navigator.storage.persist(); } }catch(e){} })();
+}
 
 // ═══════════════════════════════════════════════
 // セルフテスト（v57）── URLの末尾に ?selftest=1 を付けて開くと実行される。
@@ -5000,6 +5044,46 @@ function runSelfTests(){
   t('移行v3: 旧データ(touched無し)は変えない', mig[1].measurements.biteForce, '600');
   t('移行v3: nullを壊さない', mig[2], null);
   t('移行v3: 2回かけても同じ（冪等）', JSON.stringify(blankUntouchedAssessments(mig)), JSON.stringify(mig));
+
+  // --- v66: Codexのデバッグ指摘に対する回帰テスト（同じ壊れ方を二度としないための固定） ---
+  // ① 旧データ(touched無し)を1項目だけ編集しても、他の実測値が消えないこと
+  const oldAdu = {biteForce:'450', maxTonguePressure:'25', oralMoisture:'26', biteFilter:true};
+  const rt = restoreTouched(oldAdu, ADULT_MEAS_KEYS);
+  t('v66: 旧データのtouched復元(成人)', rt.slice().sort().join(','), 'biteForce,maxTonguePressure,oralMoisture');
+  t('v66: 旧データは初期値まで実測にしない', restoreTouched({biteForce:'450'}, ADULT_MEAS_KEYS).join(','), 'biteForce');
+  const edited = {...oldAdu, touched:rt, biteForce:'460'};
+  const editedSaved = measuredOnly({type:'adult', measurements:{...edited, touched:markTouched(edited,'biteForce')}}).measurements;
+  t('v66: 旧記録を1項目編集しても舌圧が消えない', editedSaved.maxTonguePressure, '25');
+  t('v66: 旧記録を1項目編集しても湿潤度が消えない', editedSaved.oralMoisture, '26');
+  t('v66: 編集した値は反映される', editedSaved.biteForce, '460');
+  const oldPed = {lipClosureForce:'5.0', maxTonguePressure:'', height:'110', weight:''};
+  t('v66: 旧データのtouched復元(小児)', restoreTouched(oldPed, PED_MEAS_KEYS).join(','), 'lipClosureForce,height');
+  // ⑥ 3回測定の初回リセットが、復元したtouchedのおかげで働かないこと
+  const tchd = restoreTouched(oldPed, PED_MEAS_KEYS);
+  tOk('v66: 旧記録の3回測定は初回リセットされない', tchd.indexOf('lipClosureForce')>=0);
+  // ④ EAT-10の回答は点数が未検査なら空にする
+  const eatA = {type:'adult', measurements:{...baseM, touched:[], eatAnswers:[2,2,2,2,2,2,2,2,2,2], eatScore:'20'}};
+  t('v66: 未検査のEAT-10は回答も残さない', (measuredOnly(eatA).measurements.eatAnswers||[]).filter(x=>x!=null).length, 0);
+  const eatB = {type:'adult', measurements:{...baseM, touched:['eatScore'], eatAnswers:[3,0,0,0,0,0,0,0,0,0], eatScore:'3'}};
+  t('v66: 実測したEAT-10の回答は残る', measuredOnly(eatB).measurements.eatAnswers[0], 3);
+  // ⑤ 舌圧cut-offは年齢性別で決まる（復元時も同じ値を使う）
+  t('v66: 60歳未満男性のcut-offは35', adultTongueCutoff(55,'male'), 35);
+  t('v66: cut-off35なら舌圧32はL-5', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'32'}, adultTongueCutoff(55,'male')), ['L-5']);
+  t('v66: cut-off35なら舌圧40は該当しない', computeMeasurementLItems({...baseM,touched:['maxTonguePressure'],maxTonguePressure:'40'}, adultTongueCutoff(55,'male')), []);
+  // ⑨ 前回検査に「その記録より後の検査」を選ばない
+  t('v66: 日付比較(同日は含む)', onOrBefore('2026-04-01','2026-04-01'), true);
+  t('v66: 日付比較(未来は除く)', onOrBefore('2026-07-01','2026-04-01'), false);
+  t('v66: 日付比較(ISO混在でも動く)', onOrBefore('2026-01-05T09:00:00.000Z','2026-04-01'), true);
+  const hist3 = [
+    {id:'a1', patientId:'p', type:'adult', date:'2026-01-10', measurements:{maxTonguePressure:'30'}},
+    {id:'a2', patientId:'p', type:'adult', date:'2026-04-10', measurements:{maxTonguePressure:'31'}},
+    {id:'a3', patientId:'p', type:'adult', date:'2026-07-10', measurements:{maxTonguePressure:'32'}},
+  ];
+  t('v66: 4月の記録から見た前回は1月', lastTestedDate(hist3,'p','adult',a=>(a.measurements||{}).maxTonguePressure,'a2','2026-04-10'), '2026-01-10');
+  t('v66: 基準日なしなら従来どおり最新', lastTestedDate(hist3,'p','adult',a=>(a.measurements||{}).maxTonguePressure,'a2',null), '2026-07-10');
+  // ② 別紙1と別紙2でC項目IDの意味が違う（再検査で別紙を引き継ぐ根拠）
+  tOk('v66: C-3は別紙1と別紙2で別の所見',
+    C_ITEMS_PRE.find(x=>x.id==='C-3').label !== C_ITEMS_POST.find(x=>x.id==='C-3').label);
   return R;
 }
 function renderSelfTests(){
@@ -5022,7 +5106,7 @@ function renderSelfTests(){
 }
 
 // ?selftest=1 のときはテスト結果だけを表示し、アプリ本体は起動しない（データに触れないため）
-if (/[?&]selftest=1/.test(location.search)) { renderSelfTests(); }
+if (IS_SELFTEST) { renderSelfTests(); }
 else { ReactDOM.createRoot(document.getElementById('root')).render(<App/>); }
 </script>
 <script>
