@@ -1,5 +1,5 @@
 // 口腔機能管理アプリ Service Worker（オフラインキャッシュ）
-const CACHE = "oralfunc-v67";
+const CACHE = "oralfunc-v68";
 const ASSETS = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -9,6 +9,9 @@ self.addEventListener("activate", e => {
 });
 self.addEventListener("fetch", e => {
   if (e.request.method !== "GET") return;
+  // 外部（院内保管庫の Mac mini 等）への通信には手を出さない。横取りすると、つながらない時に
+  // アプリの画面(index.html)が「成功」として返り、エラーが正しく出なくなる
+  if (new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(
     caches.match(e.request).then(r => r || fetch(e.request).then(resp => {
       try {
