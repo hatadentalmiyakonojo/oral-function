@@ -1290,7 +1290,7 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '69';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '70';           // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3;      // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1;    // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1480,6 +1480,26 @@ function compressImageFile(file, maxEdge=1280, quality=0.75){
         resolve(dataURL);
       } catch(e){ URL.revokeObjectURL(url); reject(e); }
     };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('画像を読み込めませんでした')); };
+    img.src = url;
+  });
+}
+// v70: 医院ロゴを縮小（印刷では高さ42pxで使うので長辺600pxで十分）。透過を残すためPNG、それでも大きければ白背景のJPEG。
+//   以前は選んだ画像をそのまま保存しており、写真などの大きな画像だと iPad の保存枠（約5MB）を超えて保存に失敗していた
+function compressLogo(file){
+  return new Promise((resolve,reject)=>{
+    const url = URL.createObjectURL(file); const img = new Image();
+    img.onload = () => { try {
+      const sc = Math.min(1, 600/Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth*sc)), h = Math.max(1, Math.round(img.naturalHeight*sc));
+      const cv = document.createElement('canvas'); cv.width=w; cv.height=h; cv.getContext('2d').drawImage(img,0,0,w,h);
+      let out = cv.toDataURL('image/png');
+      if(dataURLBytes(out) > 300*1024){
+        const cv2 = document.createElement('canvas'); cv2.width=w; cv2.height=h; const c2 = cv2.getContext('2d');
+        c2.fillStyle='#ffffff'; c2.fillRect(0,0,w,h); c2.drawImage(img,0,0,w,h); out = cv2.toDataURL('image/jpeg', 0.9);
+      }
+      URL.revokeObjectURL(url); resolve(out);
+    } catch(e){ URL.revokeObjectURL(url); reject(e); } };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('画像を読み込めませんでした')); };
     img.src = url;
   });
@@ -2098,10 +2118,13 @@ function computeFnScores(a){  // v67: 舌圧も他項目と同じく公式基準
   const hi = (v,t)=>{const x=parseFloat(v); return isNaN(x)?null:cl((x/t)*50);};
   const ddk = (()=>{const arr=[m.ddk_pa,m.ddk_ta,m.ddk_ka].map(parseFloat).filter(x=>!isNaN(x)); return arr.length?cl(Math.min(...arr)/6*50):null;})();
   const l7  = (()=>{const e=lo(m.eatScore,3), r=hi(m.rsst,3); const vs=[e,r].filter(x=>x!=null); return vs.length?Math.min(...vs):null;})();
+  // v70: 1つのL項目に検査が2つあるもの（清潔＝舌苔/細菌数・うるおい＝ムーカス/サクソン・かむ力＝咬合力/残存歯数）は、
+  //      測ったほうで描く（両方あれば弱いほう）。以前は片方だけ見ていて、残存歯数だけ測った「かむ力」が未検査扱いになっていた
+  const pick = (...vs) => { const a = vs.filter(x=>x!=null); return a.length ? Math.min(...a) : null; };
   const raw = [
-    {key:'L-1', name:'お口の清潔', score: lo(m.tciScore,50)},
-    {key:'L-2', name:'うるおい',   score: hi(m.oralMoisture,27)},
-    {key:'L-3', name:'かむ力',     score: hi(m.biteForce, m.biteFilter?350:500)},
+    {key:'L-1', name:'お口の清潔', score: pick(lo(m.tciScore,50), lo(m.bacteriaLevel,4))},
+    {key:'L-2', name:'うるおい',   score: pick(hi(m.oralMoisture,27), hi(m.saxonTest,2))},
+    {key:'L-3', name:'かむ力',     score: pick(hi(m.biteForce, m.biteFilter?350:500), hi(m.remainingTeeth,20))},
     {key:'L-4', name:'舌・唇の動き', score: ddk},
     {key:'L-5', name:'舌の力',     score: hi(m.maxTonguePressure, ADULT_L5_CUTOFF)},
     {key:'L-6', name:'かみくだく力', score: hi(m.masticationScore,100)},
@@ -2110,8 +2133,10 @@ function computeFnScores(a){  // v67: 舌圧も他項目と同じく公式基準
   return raw.map(ax=>{
     const weak = checked.has(ax.key);
     const measured = ax.score!=null;
-    let s = measured ? ax.score : (weak?32:82);
-    s = weak ? Math.min(s,40) : Math.max(s,60);
+    let s = measured ? ax.score : (weak?32:50);
+    // v70: 測っていない項目は基準線（50）上に置き、灰色の点で「未検査」と描く（以前は82＝一番外側の緑に描いて良好に見えていた）
+    if(!measured && !weak) s = 50;
+    else s = weak ? Math.min(s,40) : Math.max(s,60);
     return {...ax, score:s, weak, measured};
   });
 }
@@ -2142,9 +2167,9 @@ function FnRadar({scores, prev}){
       {prev && <path d={dataPath(prev)} fill="none" stroke="#9ca3af" strokeWidth="2" strokeDasharray="3,3" strokeLinejoin="round"/>}
       {/* 患者データ（今回） */}
       <path d={data} fill={anyWeak?'rgba(37,99,235,0.13)':'rgba(22,163,74,0.15)'} stroke={youColor} strokeWidth="2.4" strokeLinejoin="round"/>
-      {scores.map((s,i)=>{const[x,y]=pt(i,R*s.score/100); return <circle key={'d'+i} cx={x} cy={y} r="3.6" fill={s.weak?'#ef4444':'#22c55e'} stroke="#fff" strokeWidth="1.2"/>;})}
-      {/* 軸ラベル */}
-      {scores.map((s,i)=>{const[x,y]=pt(i,R*1.32); return <text key={'t'+i} x={x} y={y} textAnchor="middle" dominantBaseline="middle" fontSize="11.5" fontWeight={s.weak?'700':'500'} fill={s.weak?'#dc2626':'#374151'}>{s.name}</text>;})}
+      {scores.map((s,i)=>{const[x,y]=pt(i,R*s.score/100); const um=!s.measured&&!s.weak; return <circle key={'d'+i} cx={x} cy={y} r={um?3.2:3.6} fill={um?'#ffffff':(s.weak?'#ef4444':'#22c55e')} stroke={um?'#9ca3af':'#fff'} strokeWidth={um?1.6:1.2}/>;})}
+      {/* 軸ラベル（v70: 未検査は灰色＋2行目に「未検査」） */}
+      {scores.map((s,i)=>{const[x,y]=pt(i,R*1.32); const um=!s.measured&&!s.weak; return <text key={'t'+i} x={x} y={um?y-5:y} textAnchor="middle" dominantBaseline="middle" fontSize="11.5" fontWeight={s.weak?'700':'500'} fill={s.weak?'#dc2626':um?'#9ca3af':'#374151'}>{s.name}{um && <tspan x={x} dy="12" fontSize="9.5">未検査</tspan>}</text>;})}
       {/* 凡例 */}
       <g transform={`translate(${prev?10:22},${H-16})`}>
         <line x1="0" y1="-1" x2="22" y2="-1" stroke="#f59e0b" strokeWidth="2.8" strokeDasharray="6,3"/>
@@ -2153,6 +2178,8 @@ function FnRadar({scores, prev}){
         <text x="179" y="3" fontSize="11" fontWeight="600" fill={youColor}>{youLabel}</text>
         {prev && <line x1="237" y1="-1" x2="259" y2="-1" stroke="#9ca3af" strokeWidth="2" strokeDasharray="3,3"/>}
         {prev && <text x="263" y="3" fontSize="11" fontWeight="600" fill="#6b7280">前回</text>}
+        {scores.some(s=>!s.measured&&!s.weak) && <circle cx={prev?302:241} cy="-1" r="3.2" fill="#ffffff" stroke="#9ca3af" strokeWidth="1.6"/>}
+        {scores.some(s=>!s.measured&&!s.weak) && <text x={prev?309:248} y="3" fontSize="11" fontWeight="600" fill="#9ca3af">未検査</text>}
       </g>
     </svg>
   );
@@ -2540,8 +2567,9 @@ function useStore() {
   // 差分バックアップ用：保存時にupdatedAtを刻む／削除はtombstoneに記録
   const stamp = o => ({...o, updatedAt:new Date().toISOString()});
   const addTombstone = (t,id) => { const ts=load('pendingTombstones',[])||[]; ts.push({t,id,at:new Date().toISOString()}); save('pendingTombstones',ts); };
-  const addPatient = p => { const x=stamp(p); const n=[...patients,x]; setPatients(n); return save('patients',n,true); };
-  const updatePatient = p => { const x=stamp(p); const n=patients.map(o=>o.id===x.id?x:o); setPatients(n); return save('patients',n,true); };
+  // v70: 保存が成功してから画面の一覧に反映（以前は失敗しても一覧に出て、読み直すと消えていた）
+  const addPatient = p => { const x=stamp(p); const n=[...patients,x]; const ok=save('patients',n,true); if(ok) setPatients(n); return ok; };
+  const updatePatient = p => { const x=stamp(p); const n=patients.map(o=>o.id===x.id?x:o); const ok=save('patients',n,true); if(ok) setPatients(n); return ok; };
   const deletePatient = id => {
     // 当該患者の全評価が参照する写真をIndexedDBから削除（fire-and-forget）
     const photoIds = assessments.filter(x=>x.patientId===id).flatMap(x=>(x.photos||[]).map(p=>p.id));
@@ -2563,7 +2591,8 @@ function useStore() {
     const n=assessments.filter(x=>x.id!==id); setAssessments(n); save('assessments',n);
     addTombstone('assessment',id);
   };
-  const setClinic = c => { setClinicState(c); save('clinic',c); };
+  // v70: 保存の成否を返し、失敗は画面に出す（以前は失敗しても「保存しました ✓」と出ていた）
+  const setClinic = c => { const ok=save('clinic',c,true); if(ok) setClinicState(c); return ok; };
   const nextNo = () => {
     const max = patients.reduce((m,p)=>Math.max(m,parseInt(p.no.replace('#',''))||0),0);
     return '#'+String(max+1).padStart(4,'0');
@@ -2571,7 +2600,7 @@ function useStore() {
   return { patients, assessments, clinic, addPatient, updatePatient, deletePatient, addAssessment, updateAssessment, deleteAssessment, setClinic, nextNo,
     getPatient: id => patients.find(p=>p.id===id),
     getAssessment: id => assessments.find(a=>a.id===id),
-    getPatientAssessments: pid => assessments.filter(a=>a.patientId===pid).sort((a,b)=>new Date(b.date)-new Date(a.date)),
+    getPatientAssessments: pid => assessments.filter(a=>a.patientId===pid).sort(newestFirst),
   };
 }
 
@@ -2661,6 +2690,14 @@ function NumInput({label,hint,unit,value,onChange,abnormal,abnormalText}) {
 //   measured=false（未検査＝初期値/前回値の表示だけ）のとき、free欄は空にして値を薄いヒントで見せる→タップしてすぐ打てる（v61）
 // テンキー（iPadのキーボード）で入力欄が隠れないよう、フォーカスした欄を画面中央へスクロール（v64）
 //   キーボード出現のアニメーション後に位置を決めるため少し待つ。失敗しても入力自体には影響しない
+// v70: テンキー欄の入力を整える。全角の「３５」「．」は半角に直し（以前は消えていた）、小数点は1つまで（「3.5.5」を防ぐ）
+function cleanNum(s){
+  let t = String(s==null?'':s).replace(/[０-９．]/g, c=>String.fromCharCode(c.charCodeAt(0)-0xFEE0)).replace(/[^0-9.]/g,'');
+  const i = t.indexOf('.');
+  if(i>=0) t = t.slice(0,i+1) + t.slice(i+1).replace(/\./g,'');
+  if(!/[0-9]/.test(t)) return ''; // v70: 「.」だけ（全角「．」も）は未入力（以前は「測った」扱いになり、引き継いだ判定が外れ、算定メモでも実施に数えた）
+  return t;
+}
 function focusIntoView(e){
   const el = e && e.target; if(!el) return;
   setTimeout(()=>{ try{ el.scrollIntoView({block:'center', behavior:'smooth'}); }catch(_){} }, 320);
@@ -2673,7 +2710,9 @@ function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText
   const num = parseFloat(value);
   const outOfRange = free && value!=='' && value!=null && !isNaN(num) && spec && (num<spec.min || num>spec.max);
   const blankSel = !free && measured===false;
-  const sug = (blankSel && suggest!=null && suggest!=='') ? String(suggest) : '';
+  const sug = (measured===false && suggest!=null && suggest!=='') ? String(suggest) : '';
+  // テンキー版の薄い表示：suggest を渡された欄は「前回/平均の値」だけ（無ければ空）。渡されない欄（舌圧・りっぷるくん）は従来どおり
+  const freePh = suggest!==undefined ? (sug || '数値を入力') : (measured===false&&value?String(value):'数値を入力');
   return (
     <div>
       <div className="flex justify-between mb-1">
@@ -2682,8 +2721,8 @@ function SelectNum({label,hint,unit,value,onChange,specKey,abnormal,abnormalText
       </div>
       <div className="flex items-center gap-2">
         {free ? (
-          <input type="text" inputMode="decimal" value={measured===false?'':(value||'')} placeholder={measured===false&&value?String(value):'数値を入力'} disabled={disabled} onFocus={focusIntoView}
-            onChange={e=>onChange(e.target.value.replace(/[^0-9.]/g,''))}
+          <input type="text" inputMode="decimal" value={measured===false?'':(value||'')} placeholder={freePh} disabled={disabled} onFocus={focusIntoView}
+            onChange={e=>onChange(cleanNum(e.target.value))}
             className={`w-32 border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abnormal&&value!==''?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`}/>
         ) : (
           <select value={blankSel?'':(value||'')} onChange={e=>onChange(e.target.value)} disabled={disabled}
@@ -2925,12 +2964,33 @@ function ElderIcon({size=112}) {
   );
 }
 
+// ═══════════════════════════════════════════════
+// v70: 入力途中の自動控え（下書き）
+//   入力の途中で画面が読み直されたり（新しい版の自動更新・iPadのメモリ不足など）アプリが閉じても、
+//   次に開いたとき、トップ画面から「続きから再開」できるように、この端末の中にだけ控えを置く。
+//   院内保管庫・暗号化バックアップには入れない（保存前の一時的なもの）。保存・「保存せずに戻る」・「破棄」で消す。
+//   token＝どの入力画面の控えか（別の画面を開いて何も入れずに戻っても、他の控えを消さない）
+// ═══════════════════════════════════════════════
+const DRAFT_KEY = 'oralDraft';
+function readDraft(){
+  const d = load(DRAFT_KEY, null);
+  return (d && d.v===1 && (d.kind==='adult' || d.kind==='pediatric') && d.pid && d.data && d.token) ? d : null;
+}
+function writeDraft(d){ try { localStorage.setItem(DRAFT_KEY, JSON.stringify({v:1, at:new Date().toISOString(), ...d})); } catch(e){} }
+function clearDraft(){ try { localStorage.removeItem(DRAFT_KEY); } catch(e){} }
+function clearDraftIfMine(token){ const d = readDraft(); if(d && d.token===token) clearDraft(); }
+
 function Home() {
   const vaultBadgeRef = useRef(null); // v68: 院内保管庫の状態（🖥 保管 今日 10:32 など）。未設定なら何も出ない
   useEffect(()=>{ try { if(vault && vaultBadgeRef.current) vault.mountBadge(vaultBadgeRef.current); } catch(_){} }, []);
   const nav = useNav();
-  const {assessments} = useS();
+  const {assessments, patients} = useS();
   const showToast = useToast();
+  // v70: 入力途中の控えがあれば、続きから再開できるようにする
+  const draft = readDraft();
+  const draftPatient = draft ? patients.find(p=>p.id===draft.pid) : null;
+  const resumeDraft = () => nav({p:draft.kind, patientId:draft.pid, assessmentId:draft.assessmentId||undefined, mode:draft.assessmentId?undefined:(draft.mode||undefined), draft});
+  const discardDraft = () => { if(!window.confirm('入力途中のデータを破棄しますか？（元に戻せません）')) return; clearDraft(); bump(); };
   const [bkBusy, setBkBusy] = useState(false);
   const [, bump] = useReducer(x=>x+1, 0); // バックアップ後に再描画して案内を消す
   // バックアップ案内：未保存の変更がある時だけ表示。30日↑赤 / 14日↑濃い黄 / 1日↑（または未実施）通常案内
@@ -2967,6 +3027,13 @@ function Home() {
         </div>
         <button onClick={()=>nav({p:'settings'})} className="p-2 rounded-full hover:bg-gray-100 text-gray-500 text-xl" title="設定">⚙️</button>
       </header>
+      {draft && (
+        <div className="px-6 py-3 flex items-center gap-3 border-b bg-amber-50 border-amber-200 text-amber-900 flex-wrap">
+          <span className="text-sm flex-1 min-w-[16rem]">📝 入力途中のデータがあります：{draftPatient?`${draftPatient.name} さん`:'（患者が見つかりません）'}・{draft.kind==='adult'?'口腔機能低下症':'口腔機能発達不全症'}（{new Date(draft.at).toLocaleString('ja-JP',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}）{draft.unsavedPhotos?`　※保存前の顔貌写真${draft.unsavedPhotos}枚は戻りません`:''}</span>
+          {draftPatient && <button onClick={resumeDraft} className="flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white bg-amber-600 hover:bg-amber-700">続きから再開</button>}
+          <button onClick={discardDraft} className="flex-shrink-0 text-sm px-3 py-1.5 rounded-lg border border-amber-300 text-amber-800 hover:bg-amber-100">破棄</button>
+        </div>
+      )}
       {showUpdate ? (
         <div className={`px-6 py-3 flex items-center gap-3 border-b ${palette.info}`}>
           <span className="text-sm flex-1">🆕 アプリが新しくなりました（v{APP_VERSION}）。念のためバックアップをおすすめします。</span>
@@ -3029,12 +3096,20 @@ function Settings() {
   // 担当者（医師・衛生士）リストの追加・削除。登録順を保持
   const [newDoctor, setNewDoctor] = useState('');
   const [newHygienist, setNewHygienist] = useState('');
+  // v70: 担当者の追加・削除はその場で保存（以前は「設定を保存」を押さずに戻ると黙って消えていた）。
+  //      医院名など他の欄の書きかけは保存しない（保存済みの設定に担当者の一覧だけを反映）
+  const saveStaffList = (key, list) => { if(setClinic({...clinic, [key]:list})) { setForm(p=>({...p,[key]:list})); return true; } return false; };
   const addStaff = (key, setInput) => (name) => {
     const v=(name||'').trim(); if(!v) return;
-    setForm(p=>({...p,[key]:[...(p[key]||[]), v]}));
-    setInput('');
+    if(saveStaffList(key, [...(form[key]||[]), v])) setInput('');
   };
-  const removeStaff = (key, idx) => setForm(p=>({...p,[key]:(p[key]||[]).filter((_,i)=>i!==idx)}));
+  const removeStaff = (key, idx) => { saveStaffList(key, (form[key]||[]).filter((_,i)=>i!==idx)); };
+  // v70: 医院名・住所・電話・ロゴを書きかけのままトップに戻るときは確認する
+  const leaveSettings = () => {
+    const dirty = ['name','address','phone','logo'].some(k => (form[k]||'') !== ((clinic||{})[k]||''));
+    if(dirty && !window.confirm('クリニック情報（医院名・住所・電話番号・ロゴ）の変更が保存されていません。\n保存せずにトップに戻りますか？')) return;
+    nav({p:'home'});
+  };
   const inputCls = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400";
   const labelCls = "block text-sm font-medium text-gray-700 mb-1";
   // --- 院内保管庫（Mac mini への自動バックアップ・v68）。中身は vault-client.js が描く ---
@@ -3193,7 +3268,7 @@ function Settings() {
   };
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header onBack={()=>nav({p:'home'})} backLabel="トップに戻る" title="クリニック設定" sub="印刷物に表示されるクリニック情報を設定します"/>
+      <Header onBack={leaveSettings} backLabel="トップに戻る" title="クリニック設定" sub="印刷物に表示されるクリニック情報を設定します"/>
       <div className="max-w-2xl mx-auto px-6 py-8 space-y-6">
         <div className="bg-white rounded-2xl shadow-sm p-6 space-y-4">
           <h2 className="font-semibold text-gray-800">🏥 クリニック情報</h2>
@@ -3257,13 +3332,15 @@ function Settings() {
             </div>
           )}
           <input ref={fileRef} type="file" accept="image/*" className="hidden"
-            onChange={e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>setForm(p=>({...p,logo:ev.target.result}));r.readAsDataURL(f);}}/>
+            onChange={async e=>{ const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
+              try { const d = await compressLogo(f); setForm(p=>({...p,logo:d})); } // v70: 縮小してから保存（大きな画像で保存枠を超えないように）
+              catch(err){ window.alert('ロゴの画像を読み込めませんでした：'+((err&&err.message)||'不明なエラー')); } }}/>
           <div className="flex gap-3">
             <button onClick={()=>fileRef.current?.click()} className="px-4 py-2 bg-gray-100 rounded-lg text-sm">画像を選択</button>
             {form.logo && <button onClick={()=>setForm(p=>({...p,logo:''}))} className="px-4 py-2 bg-red-50 text-red-600 rounded-lg text-sm">ロゴを削除</button>}
           </div>
         </div>
-        <TapButton onClick={()=>{setClinic(form);setSaved(true);setTimeout(()=>setSaved(false),2000);}}
+        <TapButton onClick={()=>{ if(!setClinic(form)) return; setSaved(true);setTimeout(()=>setSaved(false),2000);}}
           className={`w-full py-4 rounded-2xl font-semibold text-white ${saved?'bg-green-500':'bg-blue-600 hover:bg-blue-700'}`}>
           {saved?'💾 保存しました ✓':'💾 設定を保存'}
         </TapButton>
@@ -3471,8 +3548,8 @@ function PatientForm({patientId, returnTo}) {
     if(!validate()) return;
     // 表示用のname/kanaは姓名から組み立て（既存コードとの互換のため空白1つで結合）
     const payload = {...form, name:`${form.sei.trim()} ${form.mei.trim()}`, kana:`${form.seiKana.trim()} ${form.meiKana.trim()}`};
-    if(existing) updatePatient({...existing,...payload});
-    else addPatient({id:generateId(),no:nextNo(),...payload,createdAt:new Date().toISOString()});
+    const ok = existing ? updatePatient({...existing,...payload}) : addPatient({id:generateId(),no:nextNo(),...payload,createdAt:new Date().toISOString()});
+    if(!ok) return; // v70: 保存に失敗したら画面に留まる（警告は save() が出す。入力はそのまま残る）
     setSaved(true); setTimeout(back,800);
   };
   const ic = "w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400";
@@ -3803,7 +3880,7 @@ function retestPhaseCrossed(base, birth, refDate){
   return (ag.years*12 + ag.months) >= 18;
 }
 
-function PediatricFlow({patientId:initPid, assessmentId, mode}) {
+function PediatricFlow({patientId:initPid, assessmentId, mode, draft}) {
   const nav = useNav();
   const showToast = useToast();
   const {patients, assessments, addAssessment, updateAssessment, clinic, getAssessment} = useS();
@@ -3816,45 +3893,62 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   const isRetest = mode==='retest' && !!initPid && !isLoaded;
   const retestBase = isRetest ? (assessments.filter(x=>x.patientId===initPid && x.type==='pediatric').sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null) : null;
   const retestCrossed = isRetest && retestBase ? retestPhaseCrossed(retestBase, (patients.find(p=>p.id===initPid)||{}).birth, null) : false; // v69
-  const [step, setStep] = useState((initPid||isLoaded) ? ((isRetest && retestBase && !retestCrossed) ? 'retest' : 'questionnaire') : 'select');
+  // v70: 入力途中の控えから再開するときは、その時のステップに戻る
+  const draftStep = (draft && draft.step && draft.step!=='select' && !(draft.step==='retest' && !(isRetest && retestBase && !retestCrossed))) ? draft.step : null;
+  const [step, setStep] = useState(draftStep || ((initPid||isLoaded) ? ((isRetest && retestBase && !retestCrossed) ? 'retest' : 'questionnaire') : 'select'));
   // v55: 記録一覧の「新規評価を開始」から来た場合（initPidあり・読込なし）は担当者選択を自動で開く
-  useEffect(()=>{ if(initPid && !isLoaded) setShowStaff(true); },[]);
+  useEffect(()=>{ if(initPid && !isLoaded && !draft) setShowStaff(true); },[]); // v70: 再開時は担当者の選び直しを出さない
   const [pid, setPid] = useState(loaded?loaded.patientId:(initPid||''));
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
-  const [checkedC, setCheckedC] = useState(loaded?(loaded.checkedCItems||[]):((retestBase && !retestCrossed)?(retestBase.checkedCItems||[]):[]));  // 再検査は前回のC項目を引き継ぐ（v69: 別紙が変わるときは引き継がない）
-  const [lip3, setLip3] = useState(loaded?(loaded.lipForces3||[loaded.lipClosureForce||'','','']):['','','']); // りっぷるくん3回測定。平均が測定値
-  const [tongue3, setTongue3] = useState(loaded?(loaded.tonguePres3||[loaded.maxTonguePressure||'','','']):['','','']); // JMS舌圧3回測定。平均が測定値
-  const [height, setHeight] = useState(loaded?(loaded.height||''):'');
-  const [weight, setWeight] = useState(loaded?(loaded.weight||''):'');
-  const [notes, setNotes] = useState(loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
-  const [savedId, setSavedId] = useState(assessmentId||null); // 読込時は savedId=評価ID → 保存は updateAssessment
+  const [checkedC, setCheckedC] = useState(draft ? (draft.data.checkedC||[]) : loaded?(loaded.checkedCItems||[]):((retestBase && !retestCrossed)?(retestBase.checkedCItems||[]):[]));  // 再検査は前回のC項目を引き継ぐ（v69: 別紙が変わるときは引き継がない）
+  const [lip3, setLip3] = useState(draft ? (draft.data.lip3||['','','']) : loaded?(loaded.lipForces3||[loaded.lipClosureForce||'','','']):['','','']); // りっぷるくん3回測定。平均が測定値
+  const [tongue3, setTongue3] = useState(draft ? (draft.data.tongue3||['','','']) : loaded?(loaded.tonguePres3||[loaded.maxTonguePressure||'','','']):['','','']); // JMS舌圧3回測定。平均が測定値
+  const [height, setHeight] = useState(draft ? (draft.data.height||'') : loaded?(loaded.height||''):'');
+  const [weight, setWeight] = useState(draft ? (draft.data.weight||'') : loaded?(loaded.weight||''):'');
+  const [notes, setNotes] = useState(draft ? (draft.data.notes||'') : loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
+  const [savedId, setSavedId] = useState(draft ? (loaded ? assessmentId : null) : (assessmentId||null)); // 読込時は savedId=評価ID → 保存は updateAssessment
   const [collapsed, setCollapsed] = useState(new Set());
   // v66: 再検査は前回と同じ別紙に固定する。C項目IDは別紙1と別紙2で意味が違う（例: C-3は別紙1＝舌小帯異常／別紙2＝咀嚼に影響するう蝕）ため、
   //      年齢で自動判定させると、引き継いだチェックが別の所見に化けていた。手動で切り替えればチェックはクリアされる。
-  const [phaseOverride, setPhaseOverride] = useState(loaded?(loaded.phase==='pre'?'pre':'post'):((retestBase && !retestCrossed)?(retestBase.phase==='pre'?'pre':'post'):null)); // null=年齢で自動 / 'pre' / 'post'（v69: 1歳半をまたいだ再検査は年齢で自動＝別紙2）
+  const [phaseOverride, setPhaseOverride] = useState(draft ? (draft.data.phaseOverride===undefined ? null : draft.data.phaseOverride) : loaded?(loaded.phase==='pre'?'pre':'post'):((retestBase && !retestCrossed)?(retestBase.phase==='pre'?'pre':'post'):null)); // null=年齢で自動 / 'pre' / 'post'（v69: 1歳半をまたいだ再検査は年齢で自動＝別紙2）
   const [phaseSwitch, setPhaseSwitch] = useState(null); // 別紙切替の確認モーダル対象（'pre'/'post'/'auto'）
   // 担当者（評価時に選択）。読込時は評価データから復元
-  const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
-  const [staffHygienist, setStaffHygienist] = useState(loaded?(loaded.staffHygienist||''):'');
+  const [staffDoctor, setStaffDoctor] = useState(draft ? (draft.data.staffDoctor||'') : loaded?(loaded.staffDoctor||''):'');
+  const [staffHygienist, setStaffHygienist] = useState(draft ? (draft.data.staffHygienist||'') : loaded?(loaded.staffHygienist||''):'');
   const [showStaff, setShowStaff] = useState(false); // 担当者選択モーダル
-  const [examDate, setExamDate] = useState(loaded ? ymdFromIso(loaded.date) : ymdToday()); // 検査日（評価日）。新規は今日・過去日も入力可
+  const [examDate, setExamDate] = useState(draft ? (draft.data.examDate||ymdToday()) : loaded ? ymdFromIso(loaded.date) : ymdToday()); // 検査日（評価日）。新規は今日・過去日も入力可
   const [showBackWarn, setShowBackWarn] = useState(null); // 入力途中の戻る警告（null / 'home'=上の戻る / 'list'=下の戻る）
   // v57: 未保存の変更があるか。過去記録を「変更する」で編集した場合も検知する
   //   （従来は savedId があると警告が出ず、編集内容が無言で失われていた）
-  const dirtyRef = useRef(false);
+  const dirtyRef = useRef(!!draft); // v70: 控えから再開した入力は未保存
   const firstRunRef = useRef(true);
+  const prefillRef = useRef(false); // v70: 前回値・平均の自動入力は「入力」に数えない（数えると、何も入れていないのに控えが残った）
   // 顔貌写真（最大4枚・画面表示のみ）。各要素 {id,date,size,dataURL?,missing?}
   //   新規追加分はメモリ上にdataURLを保持し、doSave時に初めてIndexedDBへput（孤児ゼロ方式）。
-  const [photos, setPhotos] = useState(loaded?(loaded.photos||[]).map(p=>({...p})):[]);
-  const [deletedPhotoIds, setDeletedPhotoIds] = useState([]); // 保存済みから削除されたid（doSave時にIDBから削除）
+  const [photos, setPhotos] = useState(draft ? ((draft.data.photos||[]).map(p=>({...p}))) : loaded?(loaded.photos||[]).map(p=>({...p})):[]);
+  const [deletedPhotoIds, setDeletedPhotoIds] = useState(draft ? (draft.data.deletedPhotoIds||[]) : []); // 保存済みから削除されたid（doSave時にIDBから削除）
   // v57: 実際に検査した項目（初期値のままの「未検査」と実測を区別する）。旧データはnull＝従来どおり値の有無で判定
-  const [touched, setTouched] = useState(loaded ? (Array.isArray(loaded.touched)?loaded.touched:restoreTouched(loaded, PED_MEAS_KEYS)) : []); // v66: 旧データは保存値＝実測として復元（編集で他項目が消えるのを防ぐ）
+  const [touched, setTouched] = useState(draft ? (Array.isArray(draft.data.touched) ? draft.data.touched : []) : loaded ? (Array.isArray(loaded.touched)?loaded.touched:restoreTouched(loaded, PED_MEAS_KEYS)) : []); // v66: 旧データは保存値＝実測として復元（編集で他項目が消えるのを防ぐ）
   const markPed = k => setTouched(p => Array.isArray(p) ? (p.indexOf(k)>=0?p:[...p,k]) : [k]);
   const measuredPed = (k, v) => (v!=='' && v!=null) && (!Array.isArray(touched) || touched.indexOf(k)>=0);
   const pedTouched = k => !Array.isArray(touched) || touched.indexOf(k)>=0; // v69: その欄を今回（またはその記録で）測ったか
   // 入力内容が変わったら「未保存の変更あり」にする（初回マウントは除く）
-  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } if(ro) return; dirtyRef.current=true; }, // v59: 閲覧中の読込は変更ではない
+  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } if(prefillRef.current){ prefillRef.current=false; return; } if(ro) return; dirtyRef.current=true; }, // v59: 閲覧中の読込は変更ではない
     [checkedC, lip3, tongue3, height, weight, notes, photos, staffDoctor, staffHygienist, examDate, phaseOverride]);
+  // v70: 入力途中の自動控え（未保存の変更があるときだけ）。保存前の顔貌写真の画像は大きいので控えに入れない（枚数だけ記録して案内する）
+  const draftToken = useRef((draft && draft.token) || generateId());
+  useEffect(()=>{
+    if(ro || step==='select' || !pid || !dirtyRef.current) return;
+    const t = setTimeout(()=>{ if(!dirtyRef.current) return;
+      const savedIds = new Set(((loaded && loaded.photos) || []).map(x=>x.id));
+      const keep = photos.filter(x=>savedIds.has(x.id)).map(x=>({id:x.id, date:x.date, size:x.size}));
+      writeDraft({token:draftToken.current, kind:'pediatric', pid, mode:mode||null, assessmentId:savedId||null, step, unsavedPhotos: photos.length - keep.length,
+        data:{checkedC, lip3, tongue3, height, weight, notes, staffDoctor, staffHygienist, examDate, phaseOverride, touched, photos:keep, deletedPhotoIds}}); }, 400);
+    return ()=>clearTimeout(t);
+  }, [checkedC, lip3, tongue3, height, weight, notes, photos, staffDoctor, staffHygienist, examDate, phaseOverride, touched, deletedPhotoIds, step, ro, savedId, pid]);
+  // v70: 新しい版の自動読み直しを、入力途中の間は待ってもらうための合図
+  useEffect(()=>{ const f = () => (step!=='select' && !ro && (!savedId || dirtyRef.current)); window.__oralUnsaved = f;
+    return ()=>{ if(window.__oralUnsaved===f) window.__oralUnsaved = null; }; });
   const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
   // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
   const [tmpDoc, setTmpDoc] = useState('');
@@ -3932,7 +4026,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
   // 患者が決まったら、検査値の初期値をセット：前回値があれば前回値、なければ年齢・性別の平均値
   // ※過去評価の読み込み時（isLoaded）はプリセットしない（復元値を上書きしないため）
   useEffect(()=>{
-    if(!patient || !age || savedId || isLoaded) return;
+    if(!patient || !age || savedId || isLoaded || draft) return; // v70: 控えから再開したときは前回値・平均で上書きしない
     const yrs = age.years;
     const ln = lipForceNorm(yrs, patient.gender);   // 口唇閉鎖力の年齢性別平均
     const tn = pedTongueNorm(yrs);                   // 最大舌圧の年齢別平均
@@ -3945,14 +4039,16 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
     // v65: 身長・体重は年齢性別の平均を初期値として表示（院長要望）。前回の実測があればそれを優先。
     //      触らなければ保存されない（未計測）のは他の検査値と同じ
     const gr = growthAvg(yrs, patient.gender);
+    prefillRef.current = true;
     setHeight(pv('height')!=null ? snapToSpec('pedHeight', pv('height')) : (gr ? snapToSpec('pedHeight', gr.h) : ''));
     setWeight(pv('weight')!=null ? snapToSpec('pedWeight', pv('weight')) : (gr ? snapToSpec('pedWeight', gr.w) : ''));
   }, [pid]);
 
   // 過去評価の読込時：各写真idをIndexedDBから取得してdataURLを充填。見つからなければ「画像なし」タイル。
+  //   v70: 控えから再開したときは、控えの写真一覧（保存済みの写真のうち残っているもの）を使う（保存するまで）
+  const draftPhotosRef = useRef(draft ? ((draft.data && draft.data.photos) || []) : null);
   useEffect(()=>{
-    if(!loaded) return;
-    const metas = loaded.photos || [];
+    const metas = draftPhotosRef.current || (loaded ? (loaded.photos || []) : []);
     if(!metas.length) return;
     let cancelled = false;
     (async()=>{
@@ -3999,7 +4095,7 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
       staffDoctor,staffHygienist,photos:photoMeta,touched:Array.isArray(touched)?touched:undefined});
     const okSave = savedId ? updateAssessment(a) : addAssessment(a);  // v57: 保存の成否
     if(!savedId && okSave) setSavedId(a.id);
-    if(okSave) dirtyRef.current = false;   // 保存済み＝未保存の変更なし
+    if(okSave){ dirtyRef.current = false; clearDraftIfMine(draftToken.current); draftPhotosRef.current = null; }   // 保存済み＝未保存の変更なし（v70: 控えも消す）
     // 写真のIDB反映（fire-and-forget・同期シグネチャ維持）：新規追加分をput、削除分をdelete。
     const toPut = photos.filter(p=>p.dataURL && !p.missing).map(p=>({id:p.id, dataURL:p.dataURL}));
     const toDel = deletedPhotoIds.slice();
@@ -4167,10 +4263,10 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
                         {!isPreWeaning && item.id==='C-17' && renderTongueBlock()}
                         {item.cat==='栄養（体格）' && (
                           <div className="px-5 pb-4 pt-1 bg-blue-50/30">
-                            <p className="text-xs text-gray-500 mb-2">📏 身長・体重（選ぶとカウプ／ローレル指数を自動計算。前回の値か年齢・性別の平均を目安として薄く表示し、一覧の先頭にも置いています。選ばなければ未計測として保存）</p>
+                            <p className="text-xs text-gray-500 mb-2">📏 身長・体重（入れるとカウプ／ローレル指数を自動計算。前回の値か年齢・性別の平均を目安として薄く表示。入れなければ未計測として保存）</p>
                             <div className="grid grid-cols-2 gap-3">
-                              <SelectNum label="身長" unit="cm" specKey="pedHeight" value={height} onChange={setHeightRO} disabled={ro} measured={pedTouched('height')} suggest={height} suggestLabel={hwLabel('height')}/>
-                              <SelectNum label="体重" unit="kg" specKey="pedWeight" value={weight} onChange={setWeightRO} disabled={ro} measured={pedTouched('weight')} suggest={weight} suggestLabel={hwLabel('weight')}/>
+                              <SelectNum label="身長" unit="cm" specKey="pedHeight" value={height} onChange={setHeightRO} disabled={ro} free measured={pedTouched('height')} suggest={height} suggestLabel={hwLabel('height')}/>
+                              <SelectNum label="体重" unit="kg" specKey="pedWeight" value={weight} onChange={setWeightRO} disabled={ro} free measured={pedTouched('weight')} suggest={weight} suggestLabel={hwLabel('weight')}/>
                             </div>
                             {/* v69: 身長・体重を両方選んだ時だけ指数を出す（未計測の目安値から計算した指数は誤解のもと） */}
                             {bodyIndex && measuredPed('height',height) && measuredPed('weight',weight) && <div className={`mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${bodyIndex.abnormal?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
@@ -4295,10 +4391,10 @@ function PediatricFlow({patientId:initPid, assessmentId, mode}) {
       </div>
       {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
       {showStaff && !isLoaded && !ro && (
-        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff} onCancel={()=>nav(pid?{p:'history',patientId:pid,returnTo:'pediatric'}:{p:'home'})}/>
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff} onCancel={()=>{ clearDraftIfMine(draftToken.current); nav(pid?{p:'history',patientId:pid,returnTo:'pediatric'}:{p:'home'}); }}/>
       )}
       {/* 入力途中の戻る警告 */}
-      {showBackWarn && <UnsavedBackModal onLeave={()=>goLeave(showBackWarn)} onStay={()=>setShowBackWarn(null)} isEdit={!!savedId}
+      {showBackWarn && <UnsavedBackModal onLeave={()=>{ clearDraftIfMine(draftToken.current); goLeave(showBackWarn); }} onStay={()=>setShowBackWarn(null)} isEdit={!!savedId}
         onSaveLeave={()=>{ if(!doSave().ok) return; showToast(savedId?'保存しました':'一時保存しました'); goLeave(showBackWarn); }}/>}
       {/* 閲覧モード中に項目へ触れた→変更確認（v55） */}
       {askEdit && <EditConfirmModal onEdit={()=>{setRo(false);setAskEdit(false);}} onCancel={()=>setAskEdit(false)}/>}
@@ -4329,7 +4425,9 @@ function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled,free,pl
   const val = m[mkey]||''; const num = parseFloat(val);
   const unmeasured = !isMeasured(m, mkey);                                   // v57: 未検査バッジ
   const abn = !unmeasured && val!=='' && !isNaN(num) && (dir==='lt' ? num<thr : num>=thr); // v69: 未検査の表示値では赤くしない
-  const sug = (unmeasured && suggest!=null && suggest!=='') ? String(suggest) : ''; // v69: 前回値（一覧の先頭に置く）
+  const sug = (unmeasured && suggest!=null && suggest!=='') ? String(suggest) : ''; // v69: 前回の実測値（薄く表示）
+  // テンキー版の薄い表示：suggest を渡された欄は前回値だけ（初期値の架空の数字は出さない）。渡されない欄は従来どおり
+  const freePh = suggest!==undefined ? (sug || placeholder || '数値を入力') : (unmeasured&&val?String(val):(placeholder||'数値を入力'));
   const outOfRange = free && val!=='' && !isNaN(num) && spec && (num<spec.min || num>spec.max); // v57: 桁間違い検知
   const cls = `w-full border rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 ${abn?'border-red-300 bg-red-50 focus:ring-red-400':'border-gray-200 focus:ring-blue-400'} ${disabled?'opacity-60':''}`;
   return (
@@ -4339,8 +4437,8 @@ function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled,free,pl
       <div className="flex items-center gap-1.5">
         {free ? (
           // 数字キーボードで直接入力（数字・小数点のみ許可。空欄は未検査）
-          <input type="text" inputMode="decimal" value={unmeasured?'':val} placeholder={unmeasured&&val?String(val):(placeholder||'数値を入力')} disabled={disabled} onFocus={focusIntoView}
-            onChange={e=>{ const v=e.target.value.replace(/[^0-9.]/g,''); setM(mkey, v); }}
+          <input type="text" inputMode="decimal" value={unmeasured?'':val} placeholder={freePh} disabled={disabled} onFocus={focusIntoView}
+            onChange={e=>{ setM(mkey, cleanNum(e.target.value)); }}
             className={cls}/>
         ) : (
           // v69: 未検査の間は空欄（同じ値を選び直しても反応しないため、前回値は一覧の先頭と横に薄く出す）
@@ -4351,7 +4449,7 @@ function MeasInput({label,unit,mkey,thr,dir='lt',m,setM,specKey,disabled,free,pl
           </select>
         )}
         {unit && <span className="text-xs text-gray-500 flex-shrink-0">{unit}</span>}
-        {!free && sug && <span className="text-[11px] text-gray-400 flex-shrink-0 whitespace-nowrap">前回 {sug}</span>}
+        {sug && <span className="text-[11px] text-gray-400 flex-shrink-0 whitespace-nowrap">前回 {sug}</span>}
       </div>
       {outOfRange && <p className="text-xs text-amber-600 mt-0.5">⚠ 桁を確認してください（通常 {spec.min}〜{spec.max}{unit}）</p>}
       {abn && !unmeasured && <p className="text-xs text-red-500 mt-0.5">基準値以下</p>}
@@ -4452,37 +4550,140 @@ const L_TEST_KEYS = {'L-1':['tciScore','bacteriaLevel'], 'L-2':['oralMoisture','
 //     判定と誤認し、今回の測定が基準内に戻っても L-5 などが外れなかった）
 //   ・土台が再検査の記録なら、その記録がさらに前から引き継いだ判定（carriedLItems）も「検査由来」として扱う
 //     （区別を保存しないと、2回目の再検査で「手で付けた判定」と誤認し、測り直しても外れなかった）
-function splitRetestLItems(base){
-  const saved = (base && base.checkedLItems) || [];
-  const bm = (base && base.measurements) || {};
-  const prevCarried = (base && Array.isArray(base.carriedLItems)) ? base.carriedLItems : [];
-  let auto = [];
-  try { auto = computeMeasurementLItems({...EMPTY_M, ...bm, touched: Array.isArray(bm.touched) ? bm.touched : restoreTouched(bm, ADULT_MEAS_KEYS)}); }
-  catch(e){ auto = []; }
-  const fromTests = saved.filter(x=>auto.includes(x) || prevCarried.includes(x));
-  return { manual: saved.filter(x=>!fromTests.includes(x)), carried: fromTests.filter(x=>!RETEST_L_ITEMS.includes(x)) };
+// v70: 引き継ぎを「L項目ごと」から「その判定を出した検査ごと」に改めた。
+//   （v69は、前回「残存歯数16本」で付いたL-3が、今回 咬合力だけ測って残存歯数を入れないと外れ、該当3→2で「非該当」になった。
+//     舌圧を測り忘れたときも前回のL-5が黙って消えた）
+//   決まり：各検査は「最後に測った値」で判定する。今回測った検査は今回の値、測らなかった検査は前回まで（さらに前の記録へ
+//   さかのぼる）の値。前回の記録に付いていたL項目は、その判定を出した検査（carriedKeys）を今回測り直すまで引き継ぐ。
+//   ・前回の記録で外れていたL項目は自動では戻さない（意図して外した判定を尊重。v63〜v69の不具合で消えたものは「要確認」で知らせ、ボタンで戻せる）
+//   ・検査値が一度も無いL項目だけを「手で付けた判定」（視診など）として、そのまま引き継ぐ
+//   ・v63〜v68の記録（引き継ぎの区別が無い）・v69の記録（もとの検査が無い）も、各記録の検査値から同じ決まりで分ける
+// 各検査の名前と単位（引き継いだ判定の「もとの検査」を画面・計画書に出すため）
+const L_TEST_INFO = {tciScore:['舌苔(TCI)','%'], bacteriaLevel:['細菌数','レベル'], oralMoisture:['口腔湿潤度',''], saxonTest:['サクソンテスト','g'],
+  biteForce:['咬合力','N'], remainingTeeth:['残存歯数','本'], ddk_pa:['ディアドコ「パ」','回/秒'], ddk_ta:['ディアドコ「タ」','回/秒'], ddk_ka:['ディアドコ「カ」','回/秒'],
+  maxTonguePressure:['舌圧','kPa'], masticationScore:['咀嚼能力(グルコース)','mg/dL'], eatScore:['EAT-10','点'], rsst:['RSST','回']};
+const hasLKey = id => Object.prototype.hasOwnProperty.call(L_TEST_KEYS, id);
+// 記録の並び：日付の新しい順。同じ日なら後から作った方を新しいとみなす（v70: 以前は同じ日の2件で先に保存した方を「前回」にしていた）
+//   作った時刻は generateId() の先頭8文字（ミリ秒の36進）。保存し直しても変わらない。読めないidだけ更新日時で比べる
+const idTime = id => { const t = parseInt(String(id||'').slice(0,8), 36); return (t > 1.6e12 && t < 4.1e12) ? t : 0; };
+const newestFirst = (x,y) => (new Date(y.date)-new Date(x.date)) || (idTime(y.id)-idTime(x.id)) || String(y.updatedAt||'').localeCompare(String(x.updatedAt||''));
+// そのL項目を「該当」にした検査（その検査だけで基準を下回ったもの）。咬合力低下なら咬合力・残存歯数のどちらか／両方
+function lItemCauseKeys(m, id){
+  if(!hasLKey(id)) return [];
+  return L_TEST_KEYS[id].filter(k => isMeasured(m,k) && computeMeasurementLItems({...m, touched:[k]}).includes(id));
 }
-// v69: v63〜v68 の再検査で誤って保存された可能性のある記録を見つける（記録一覧の「要確認」の印）。prev=その記録の前回の成人記録
-//   ① L-2/L-3/L-5 が付いているのに、この記録で測ったその検査はどれも基準内（旧記録の判定が残った）
-//   ② 前回あった L-1/L-4/L-6/L-7 が、この記録では測っていないのに消えている（前回の判定を捨てた）
+// 新しい順に並んだ記録から、各検査の「最後に測った値」を集める（咬合力はそのときのフィルタの有無も一緒に）
+function collectLatest(listNewestFirst){
+  const out = {};
+  (listNewestFirst||[]).forEach(x=>{
+    if(!x || x.type!=='adult') return;
+    const mm = ((measuredOnly(x)||{}).measurements)||{};
+    ADULT_MEAS_KEYS.forEach(k=>{ if(out[k]==null && mm[k]!=null && mm[k]!==''){ out[k] = mm[k]; if(k==='biteForce') out.biteFilter = mm.biteFilter!==false; } });
+  });
+  return out;
+}
+function latestMeasuredValues(list){ return collectLatest([...(list||[])].sort(newestFirst)); }
+// 集めた値を「測った検査」として判定に渡せる形にする
+const asMeasured = vals => ({...vals, touched: ADULT_MEAS_KEYS.filter(k=>vals[k]!=null && vals[k]!=='')});
+// 再検査の土台（前回の記録 base）のL項目を分ける。older＝base より前の同じ患者の成人記録（新しい順）
+//   引き継ぐときの「もとの検査」は、①最後に測った値で基準を下回っている検査 ②（それが無ければ）前回の記録が覚えている
+//   もとの検査（v70の記録。それより前の記録が消されていても分かる）③どれも基準内なら値のある検査（旧基準で付いた判定・
+//   誤って残った判定は、その検査を測り直した時点で今回の値に置き換わる）。値が一つも無いL項目は手で付けた判定
+function splitRetestLItems(base, older){
+  const saved = (base && Array.isArray(base.checkedLItems)) ? base.checkedLItems : [];
+  const prevCarried = (base && Array.isArray(base.carriedLItems)) ? base.carriedLItems : [];
+  const prevKeys = (base && base.carriedLKeys && typeof base.carriedLKeys==='object' && !Array.isArray(base.carriedLKeys)) ? base.carriedLKeys : {};
+  const lm = asMeasured(collectLatest([base, ...(Array.isArray(older) ? older : [])]));
+  const own = base ? asMeasured(collectLatest([base])) : {touched:[]};
+  const isV70 = !!(base && base.carriedLKeys && typeof base.carriedLKeys==='object' && !Array.isArray(base.carriedLKeys));
+  let ownAuto = []; try { ownAuto = computeMeasurementLItems(own); } catch(e){ ownAuto = []; }
+  const manual = [], carried = [], carriedKeys = {};
+  saved.forEach(id => {
+    if(!hasLKey(id)){ manual.push(id); return; }
+    // v70で保存した記録の「手で付けた判定」（引き継ぎでもその記録の測定でもない）は、医師の判断としてそのまま引き継ぐ
+    //   （昔の検査値があっても検査由来にしない。以前は、所見で付けたL-6が、後日グルコースが基準内に戻ると黙って消えた）
+    if(isV70 && !prevCarried.includes(id) && !ownAuto.includes(id)){ manual.push(id); return; }
+    let ks = null;
+    try { const c = lItemCauseKeys(lm, id); if(c.length) ks = c; } catch(e){}
+    if(!ks && prevCarried.includes(id) && Array.isArray(prevKeys[id])){ const e = prevKeys[id].filter(k=>L_TEST_KEYS[id].includes(k) && !isMeasured(own,k)); if(e.length) ks = e; }
+    if(!ks){ const w = L_TEST_KEYS[id].filter(k=>isMeasured(lm,k)); if(w.length) ks = w; }
+    if(ks){ carried.push(id); carriedKeys[id] = ks; return; }
+    // 前回も引き継ぎだったが、もとの値が残っていない（v69の記録で、それより前の記録が無い）→ v69と同じ扱い
+    if(prevCarried.includes(id)){ carried.push(id); return; }
+    manual.push(id);  // 検査に関係なく手で付けた判定（視診など）
+  });
+  return { manual, carried, carriedKeys };
+}
+// v70: 引き継いだ判定が今も有効か。もとの検査が分かっていれば「そのどれかをまだ測り直していない間」、
+//   分からなければ（v69の記録）「その項目の検査をどれも測っていない間」だけ有効（測れば今回の値で判定する）
+function carriedCauseKeys(id, carriedKeys){
+  if(!hasLKey(id)) return null;
+  const all = L_TEST_KEYS[id];
+  const ks = (carriedKeys && Array.isArray(carriedKeys[id])) ? carriedKeys[id].filter(k=>all.includes(k)) : [];
+  return ks.length ? ks : null;
+}
+function activeCarried(carriedL, carriedKeys, m){
+  return (carriedL||[]).filter(id => {
+    const ks = carriedCauseKeys(id, carriedKeys);
+    return ks ? ks.some(k=>!isMeasured(m,k)) : !(hasLKey(id) ? L_TEST_KEYS[id] : []).some(k=>isMeasured(m,k));
+  });
+}
+// 保存用：有効な引き継ぎ判定ごとに、まだ測り直していない「もとの検査」（次の再検査に渡す）
+function carriedKeysToSave(active, carriedKeys, m){
+  const out = {};
+  (active||[]).forEach(id => { const ks = carriedCauseKeys(id, carriedKeys); if(ks){ const rest = ks.filter(k=>!isMeasured(m,k)); if(rest.length) out[id] = rest; } });
+  return out;
+}
+// 引き継いだ判定の説明（例「残存歯数 16本」）。前回の値が無ければ検査名だけ。m を渡すと、今回もう測り直した検査は出さない
+function carriedCauseText(id, carriedKeys, prevM, m){
+  let ks = carriedCauseKeys(id, carriedKeys);
+  if(!ks) return '';
+  if(m){ const rest = ks.filter(k=>!isMeasured(m,k)); if(rest.length) ks = rest; }
+  return ks.map(k => { const [label, unit] = L_TEST_INFO[k] || [k,'']; const v = prevM && prevM[k]!=null && prevM[k]!=='' ? prevM[k] : '';
+    return v!=='' ? `${label} ${v}${unit}` : label; }).join('・');
+}
+// v69: v63〜v69 の再検査で誤って保存された可能性のある記録を見つける（記録一覧の「要確認」の印）。older＝その記録より前の同じ患者の成人記録（新しい順）
+//   ① stuck：L-2/L-3/L-5 が付いているのに、この記録で測ったその検査は基準内で、それより前の値でも該当しない（古い判定が残った）
+//   ② lost：前回あったL項目がこの記録で消えている。その判定を出した検査を今回測っていない（＝引き継ぐべきだった）
+//   v70: 判定の決まり（最後に測った値）にそろえた。残存歯数で付いたL-3は咬合力が基準内でも残るのが正しい＝①に出さない。
+//        咬合力だけ測って残存歯数由来のL-3が消えた記録・舌圧を測らずL-5が消えた記録・何も測らずに保存した記録も②で見つける。
+//        v70以降で保存した記録（carriedLKeys を持つ）は正しい決まりで判定済みなので対象外（外れているのは意図して外したもの）
 const RETEST_BUG_FROM = '2026-09-09'; // 再検査モード（v63）の開始日。これより前の記録は対象外
-function retestReviewNotes(a, prev){
-  const out = [];
-  if(!a || a.type!=='adult' || String(a.date||'').slice(0,10) < RETEST_BUG_FROM) return out;
+const RETEST_KEYS = ['oralMoisture','saxonTest','biteForce','remainingTeeth','maxTonguePressure'];
+function retestReview(a, older){
+  const none = {stuck:[], lost:[]};
+  if(!a || a.type!=='adult' || String(a.date||'').slice(0,10) < RETEST_BUG_FROM) return none;
+  if(a.carriedLKeys && typeof a.carriedLKeys==='object') return none;
   const m = a.measurements || {};
-  if(!Array.isArray(m.touched)) return out;
-  const checked = a.checkedLItems || [];
-  let auto = []; try { auto = computeMeasurementLItems(m); } catch(e){}
-  const stuck = RETEST_L_ITEMS.filter(id => checked.includes(id) && !auto.includes(id) && L_TEST_KEYS[id].some(k=>isMeasured(m,k)));
-  if(stuck.length) out.push(`${stuck.join('・')} が付いていますが、この記録の測定値は基準内です`);
-  // ②は再検査らしい記録（測った検査が舌圧・咬合圧・湿潤度まわりだけ）に限る。フル評価で測らなかった項目まで騒がないため
-  const RETEST_KEYS = ['oralMoisture','saxonTest','biteForce','remainingTeeth','maxTonguePressure'];
-  const measuredKeys = ADULT_MEAS_KEYS.filter(k=>isMeasured(m,k));
-  const retestLike = measuredKeys.length>0 && measuredKeys.every(k=>RETEST_KEYS.includes(k));
+  if(!Array.isArray(m.touched)) return none;
+  const checked = Array.isArray(a.checkedLItems) ? a.checkedLItems : [];
+  const hist = (Array.isArray(older) ? older : []).filter(x=>x && x.type==='adult');
+  const lm = asMeasured(collectLatest([a, ...hist]));
+  const support = id => { try { return lItemCauseKeys(lm, id); } catch(e){ return []; } };
+  const carriedHere = Array.isArray(a.carriedLItems) ? a.carriedLItems : [];
+  const isV69 = Array.isArray(a.carriedLItems);
+  const stuck = RETEST_L_ITEMS.filter(id => checked.includes(id) && !carriedHere.includes(id) && !support(id).length && L_TEST_KEYS[id].some(k=>isMeasured(m,k)));
+  // ②は再検査らしい記録（測った検査が舌圧・咬合圧・湿潤度まわりだけ。v70: 何も測っていない記録も）に限る。フル評価で測らなかった項目まで騒がないため
+  const retestLike = ADULT_MEAS_KEYS.filter(k=>isMeasured(m,k)).every(k=>RETEST_KEYS.includes(k));
+  const prev = hist[0];
+  const lost = [];
   if(prev && retestLike){
-    const lost = (prev.checkedLItems||[]).filter(id => !RETEST_L_ITEMS.includes(id) && !checked.includes(id) && L_TEST_KEYS[id] && !L_TEST_KEYS[id].some(k=>isMeasured(m,k)));
-    if(lost.length) out.push(`前回の ${lost.join('・')} がこの記録にありません（今回は測っていない項目）`);
+    (Array.isArray(prev.checkedLItems) ? prev.checkedLItems : []).forEach(id => {
+      if(!hasLKey(id) || checked.includes(id)) return;
+      // v69で保存した記録（carriedLItems を持つ）：L-1/L-4/L-6/L-7 は v69 でも正しく引き継がれた。その検査をどれも測っていないのに
+      //   消えているのは、タップで意図して外したもの（出さない）。v69 で誤って消えたのは L-2/L-3/L-5 と、検査の一部だけ測ったとき
+      if(isV69 && !RETEST_L_ITEMS.includes(id) && !L_TEST_KEYS[id].some(k=>isMeasured(m,k))) return;
+      const ks = support(id).filter(k=>!isMeasured(m,k));
+      if(ks.length) lost.push({id, keys:ks});
+    });
   }
+  return {stuck, lost};
+}
+function retestReviewNotes(a, older){
+  const r = retestReview(a, older);
+  const out = [];
+  if(r.stuck.length) out.push(`${r.stuck.join('・')} が付いていますが、この記録の測定値は基準内です`);
+  if(r.lost.length) out.push(`前回の ${r.lost.map(x=>x.id).join('・')} がこの記録にありません（今回は測っていない検査：${[...new Set(r.lost.flatMap(x=>x.keys))].map(k=>(L_TEST_INFO[k]||[k])[0]).join('・')}）`);
   return out;
 }
 
@@ -4513,7 +4714,7 @@ function EAT10({answers, onChange, disabled}) {
   );
 }
 
-function AdultFlow({patientId:initPid, assessmentId, mode}) {
+function AdultFlow({patientId:initPid, assessmentId, mode, draft}) {
   const nav = useNav();
   const showToast = useToast();
   const {patients, assessments, addAssessment, updateAssessment, clinic, getAssessment} = useS();
@@ -4539,19 +4740,38 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   })() : null;
   // v63: 再検査モード（3か月ごとの再評価＝舌圧・咬合圧・湿潤度＝点数のある3検査だけ入力）。前回の成人記録を引き継いで新しい記録を作る
   const isRetest = mode==='retest' && !!initPid && !isLoaded;
-  const retestBase = isRetest ? (assessments.filter(x=>x.patientId===initPid && x.type==='adult').sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null) : null;
-  const [step,setStep] = useState((initPid||isLoaded) ? ((isRetest && retestBase) ? 'retest' : 'litems') : 'select');
+  // v70: 土台＝最新の成人記録（同じ日なら後から保存した方）。それより前の記録は「最後に測った値」をさかのぼるのに使う
+  const retestHist = isRetest ? assessments.filter(x=>x.patientId===initPid && x.type==='adult').sort(newestFirst) : [];
+  const retestBase = retestHist[0] || null;
+  // 土台のL項目の分け方と、土台の記録の「要確認」（開いた時点で1回だけ求める）
+  const [retestSplit] = useState(()=> retestBase ? splitRetestLItems(retestBase, retestHist.slice(1)) : null);
+  const [baseReview] = useState(()=> retestBase ? retestReview(retestBase, retestHist.slice(1)) : null);
+  // v70: タップで「前回からの引き継ぎ」として戻せる項目＝この画面を開いたときに引き継いでいた判定・前回の記録で（以前の版の不具合で）消えていた判定。
+  //   それ以外をタップで付けたら「手で付けた判定」（医師の所見）＝昔の検査値で引き継ぎ扱いにしない（後日その検査が基準内でも黙って外れない）
+  const [restorable] = useState(()=>{
+    const ids = new Set([...(retestSplit ? retestSplit.carried : []), ...(baseReview ? baseReview.lost.map(x=>x.id) : [])]);
+    if(loaded && loaded.type==='adult'){
+      (Array.isArray(loaded.carriedLItems) ? loaded.carriedLItems : []).forEach(id=>ids.add(id));
+      try { const older = assessments.filter(x=>x.patientId===loaded.patientId && x.type==='adult' && x.id!==loaded.id && newestFirst(loaded, x) < 0).sort(newestFirst);
+        retestReview(loaded, older).lost.forEach(x=>ids.add(x.id)); } catch(e){}
+    }
+    return ids;
+  });
+  // v70: 入力途中の控えから再開するときは、その時のステップに戻る
+  const draftStep = (draft && draft.step && draft.step!=='select' && !(draft.step==='retest' && !(isRetest && retestBase))) ? draft.step : null;
+  const [step,setStep] = useState(draftStep || ((initPid||isLoaded) ? ((isRetest && retestBase) ? 'retest' : 'litems') : 'select'));
   // v55: 記録一覧の「新規評価を開始」から来た場合（initPidあり・読込なし）は担当者選択を自動で開く
-  useEffect(()=>{ if(initPid && !isLoaded) setShowStaff(true); },[]);
+  useEffect(()=>{ if(initPid && !isLoaded && !draft) setShowStaff(true); },[]); // v70: 再開時は担当者の選び直しを出さない
   const [pid,setPid] = useState(loaded?loaded.patientId:(initPid||''));
   useEffect(()=>{ window.scrollTo(0,0); }, [step]); // ステップ切替時は先頭から表示
-  const [m,setM] = useState(loadedM||{...EMPTY_M});
+  const [m,setM] = useState(draft ? {...EMPTY_M, ...((draft.data||{}).m||{})} : (loadedM||{...EMPTY_M}));
   // 手動L項目の復元：保存済み checkedLItems から自動判定分（measL）を除いた差分。算出不能時は全件をそのまま手動扱い
   const [manualL,setManualL] = useState(()=>{
+    if(draft) return Array.isArray(draft.data.manualL) ? draft.data.manualL : [];
     // v66: 自動判定分を差し引く時の舌圧cut-offを、画面・印刷と同じ「患者の年齢性別の値」に揃える。
     //      以前は30固定だったため、例えば60歳未満男性（基準35）で舌圧32を測った記録では
     //      L-5が自動判定から漏れて手動チェック扱いになり、舌圧が改善してもL-5が残り続けていた。
-    if(retestBase) return splitRetestLItems(retestBase).manual; // 再検査: 前回の手動チェック分（視診等）。v69: 旧記録も正しく分ける
+    if(retestSplit) return retestSplit.manual; // 再検査: 前回の手動チェック分（視診等）。v69: 旧記録も正しく分ける（v70: 検査値が一度も無い判定だけ）
     if(!loaded) return [];
     const saved = loaded.checkedLItems||[];
     const carriedSaved = Array.isArray(loaded.carriedLItems) ? loaded.carriedLItems : []; // v69: 再検査で引き継いだ判定は手動扱いにしない
@@ -4559,23 +4779,39 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     catch(e){ return saved.filter(x=>!carriedSaved.includes(x)); }
   });
   // v69: 再検査で今回測らない項目（L-1/L-4/L-6/L-7）の前回の判定（検査由来）。その検査を今回測ったら外し、測定で判定し直す
-  const [carriedL, setCarriedL] = useState(()=> retestBase ? splitRetestLItems(retestBase).carried
+  const [carriedL, setCarriedL] = useState(()=> draft ? (Array.isArray(draft.data.carriedL) ? draft.data.carriedL : []) : retestSplit ? retestSplit.carried
     : (loaded && Array.isArray(loaded.carriedLItems)) ? loaded.carriedLItems.filter(x=>(loaded.checkedLItems||[]).includes(x)) : []);
-  const [notes,setNotes] = useState(loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
-  const [savedId,setSavedId] = useState(assessmentId||null); // 読込時は savedId=評価ID → 保存は updateAssessment
+  // v70: 引き継いだ判定ごとの「もとの検査」（例 L-3←残存歯数）。その検査を今回測り直すまで前回の判定を保つ
+  const [carriedKeys, setCarriedKeys] = useState(()=>{ const ok = o => (o && typeof o==='object' && !Array.isArray(o)) ? o : {};
+    return draft ? ok(draft.data.carriedKeys) : retestSplit ? retestSplit.carriedKeys : ok(loaded && loaded.carriedLKeys); });
+  const [notes,setNotes] = useState(draft ? (draft.data.notes||'') : loaded?(loaded.notes||''):(retestBase?(retestBase.notes||''):''));  // 再検査は前回のメモを引き継ぐ
+  const [savedId,setSavedId] = useState(draft ? (loaded ? assessmentId : null) : (assessmentId||null)); // 読込時は savedId=評価ID → 保存は updateAssessment
   // 担当者（評価時に選択）。読込時は評価データから復元
-  const [staffDoctor, setStaffDoctor] = useState(loaded?(loaded.staffDoctor||''):'');
-  const [staffHygienist, setStaffHygienist] = useState(loaded?(loaded.staffHygienist||''):'');
+  const [staffDoctor, setStaffDoctor] = useState(draft ? (draft.data.staffDoctor||'') : loaded?(loaded.staffDoctor||''):'');
+  const [staffHygienist, setStaffHygienist] = useState(draft ? (draft.data.staffHygienist||'') : loaded?(loaded.staffHygienist||''):'');
   const [showStaff, setShowStaff] = useState(false); // 担当者選択モーダル
-  const [examDate, setExamDate] = useState(loaded ? ymdFromIso(loaded.date) : ymdToday()); // 検査日（評価日）。新規は今日・過去日も入力可
+  const [examDate, setExamDate] = useState(draft ? (draft.data.examDate||ymdToday()) : loaded ? ymdFromIso(loaded.date) : ymdToday()); // 検査日（評価日）。新規は今日・過去日も入力可
   const [showBackWarn, setShowBackWarn] = useState(null); // 入力途中の戻る警告（null / 'home'=上の戻る / 'list'=下の戻る）
   // v57: 未保存の変更があるか。過去記録を「変更する」で編集した場合も検知する
   //   （従来は savedId があると警告が出ず、編集内容が無言で失われていた）
-  const dirtyRef = useRef(false);
+  const dirtyRef = useRef(!!draft); // v70: 控えから再開した入力は未保存
   const firstRunRef = useRef(true);
+  const prefillRef = useRef(false); // v70: 前回値の自動入力は「入力」に数えない（数えると、何も入れていないのに控えが残った）
   // 入力内容が変わったら「未保存の変更あり」にする（初回マウントは除く）
-  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } if(ro) return; dirtyRef.current=true; }, // v59: 閲覧中の読込は変更ではない
-    [m, manualL, carriedL, notes, staffDoctor, staffHygienist, examDate]);
+  useEffect(()=>{ if(firstRunRef.current){ firstRunRef.current=false; return; } if(prefillRef.current){ prefillRef.current=false; return; } if(ro) return; dirtyRef.current=true; }, // v59: 閲覧中の読込は変更ではない
+    [m, manualL, carriedL, carriedKeys, notes, staffDoctor, staffHygienist, examDate]);
+  // v70: 入力途中の自動控え（未保存の変更があるときだけ・0.4秒まとめて書く）。保存・「保存せずに戻る」で消える
+  const draftToken = useRef((draft && draft.token) || generateId());
+  useEffect(()=>{
+    if(ro || step==='select' || !pid || !dirtyRef.current) return;
+    const t = setTimeout(()=>{ if(!dirtyRef.current) return;
+      writeDraft({token:draftToken.current, kind:'adult', pid, mode:mode||null, assessmentId:savedId||null, step,
+        data:{m, manualL, carriedL, carriedKeys, notes, staffDoctor, staffHygienist, examDate}}); }, 400);
+    return ()=>clearTimeout(t);
+  }, [m, manualL, carriedL, carriedKeys, notes, staffDoctor, staffHygienist, examDate, step, ro, savedId, pid]);
+  // v70: 新しい版の自動読み直しを、入力途中の間は待ってもらうための合図
+  useEffect(()=>{ const f = () => (step!=='select' && !ro && (!savedId || dirtyRef.current)); window.__oralUnsaved = f;
+    return ()=>{ if(window.__oralUnsaved===f) window.__oralUnsaved = null; }; });
   const docList = clinic?.doctors||[], hygList = clinic?.hygienists||[];
   // 担当者選択モーダルの一時選択（初期選択は各リストの先頭）
   const [tmpDoc, setTmpDoc] = useState('');
@@ -4594,7 +4830,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   const prevA = useMemo(()=>{
     return assessments
       .filter(x=>x.patientId===pid && x.type==='adult' && x.id!==savedId && onOrBefore(x.date, baseDate))
-      .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null;
+      .sort(newestFirst)[0] || null;
   },[assessments, pid, savedId, baseDate]);
 
   // 検査間隔3か月警告（舌圧・咬合圧・口腔粘膜湿潤度。前回検査値が入った直近評価日から3暦月未満なら算定不可）
@@ -4605,7 +4841,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   // 患者が決まったら、前回の検査値をプリセット（再評価の入力を高速化）。前回が無ければ既定値のまま
   // ※過去評価の読み込み時（isLoaded）はプリセットしない（復元値を上書きしないため）
   useEffect(()=>{
-    if(!pid || !prevA || savedId || isLoaded) return;
+    if(!pid || !prevA || savedId || isLoaded || draft) return; // v70: 控えから再開したときは前回値で上書きしない
     const pm = prevA.measurements||{};
     // v60: 前回が空欄（未検査）だった項目は初期値のまま。前回の実測値だけを引き継ぐ。touched は引き継がない
     const merged = {...EMPTY_M, touched:[]};
@@ -4626,14 +4862,21 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       const snap = snapToSpec('oralMoisture', parseFloat(pm.oralMoisture));
       merged.moist3 = [snap, snap, snap];
     }
+    prefillRef.current = true;
     setM(merged);
   },[pid]);
-  // v69: プルダウン欄に出す「前回」の値（前回の記録の実測値だけ・選択肢の刻みに合わせる）
-  const prevMeas = useMemo(()=> prevA ? (((measuredOnly(prevA)||{}).measurements)||{}) : {}, [prevA]);
-  const sg = k => (prevMeas[k]!=null && prevMeas[k]!=='') ? snapToSpec(k, parseFloat(prevMeas[k])) : '';
+  // v70: この患者の過去の記録で、各検査を最後に測った値（表示だけに使う：欄の「前回」・引き継いだ判定のもとの値）
+  const lastMeas = useMemo(()=>latestMeasuredValues(assessments.filter(x=>x.patientId===pid && x.type==='adult' && x.id!==savedId && onOrBefore(x.date, baseDate))),
+    [assessments, pid, savedId, baseDate]);
+  // v69: 数字欄に薄く出す「前回」の値（実測値だけ・選択肢の刻みに合わせる）
+  // v70: 直前の記録で測っていない検査（再検査のあとの残存歯数など）は、さらに前の記録で最後に測った値を出す
+  const sg = k => (lastMeas[k]!=null && lastMeas[k]!=='') ? snapToSpec(k, parseFloat(lastMeas[k])) : '';
   const measL = useMemo(()=>computeMeasurementLItems(m),[m]);
+  // v70: 画面のレーダー・処方は実測値だけで（未検査の初期値で描いたり、処方を決めたりしない）。印刷と同じ結果になる
+  const mMeasured = useMemo(()=>((measuredOnly({type:'adult', measurements:m})||{}).measurements) || m, [m]);
   // v69: 引き継いだ判定は、その項目の検査を今回測っていない間だけ有効（測れば measL が判定する）
-  const carriedActive = useMemo(()=>carriedL.filter(id=>!(L_TEST_KEYS[id]||[]).some(k=>isMeasured(m,k))),[carriedL,m]);
+  // v70: 「その判定を出した検査」をまだ測り直していない間だけ有効（例：咬合力だけ測っても、残存歯数で付いたL-3は残す）
+  const carriedActive = useMemo(()=>activeCarried(carriedL, carriedKeys, m),[carriedL,carriedKeys,m]);
   const allL = useMemo(()=>[...new Set([...measL,...manualL,...carriedActive])],[measL,manualL,carriedActive]);
   const diag = useMemo(()=>{
     const cnt=allL.length; const q_=cnt>=3;
@@ -4642,11 +4885,31 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   },[allL]);
 
   // 各セッターは閲覧モード（ro）ではガードして変更を無効化する
+  // v70: 過去の記録の「最後に測った値」（タップで判定を付けるとき、過去の検査値で該当するかを見る）
+  const histM = useMemo(()=>asMeasured(lastMeas),[lastMeas]);
   const toggleML = id => { if(ro) return;
-    if(carriedActive.includes(id)){ setCarriedL(p=>p.filter(x=>x!==id)); return; } // v69: 前回から引き継いだ判定を外す
     // v69: 測定値から自動判定中の項目はタップしても変えない（手動扱いになり、値を直しても外れなくなっていた）
+    // v70: 先に見る。以前は引き継ぎ中でもある行をタップすると、見た目は変わらないのに裏で引き継ぎが消え、測定値を直すと判定が消えた
     if(measL.includes(id) && !manualL.includes(id)) return;
-    setManualL(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]); };
+    if(carriedActive.includes(id)){ setCarriedL(p=>p.filter(x=>x!==id)); return; } // v69: 前回から引き継いだ判定を外す
+    if(manualL.includes(id)){ setManualL(p=>p.filter(x=>x!==id)); return; }
+    // v70: 外した引き継ぎ・前回の記録で消えていた判定を付け直すときは「前回からの引き継ぎ」として戻す
+    //      （手で付けた判定にすると、あとでその検査を測り直して基準内でも外れなかった。要確認の記録を直すときも同じ）
+    if(restorable.has(id)){
+      const known = carriedCauseKeys(id, carriedKeys);
+      let ks = known || []; if(!ks.length){ try { ks = lItemCauseKeys(histM, id); } catch(e){ ks = []; } }
+      ks = ks.filter(k=>!isMeasured(m,k));
+      if(ks.length){ setCarriedKeys(p=>({...p, [id]:ks})); setCarriedL(p=>p.includes(id)?p:[...p,id]); return; }
+      // もとの検査が分からない引き継ぎ（v69の記録）は、その項目の検査を今回どれも測っていなければそのまま戻す
+      if(!known && hasLKey(id) && !L_TEST_KEYS[id].some(k=>isMeasured(m,k))){ setCarriedL(p=>p.includes(id)?p:[...p,id]); return; }
+    }
+    setManualL(p=>[...p,id]); };
+  // v70: 前回の記録で（以前の版の不具合で）消えていた判定を、この再検査に戻す
+  const [lostRestored, setLostRestored] = useState(false);
+  const restoreLost = () => { if(ro || !baseReview) return;
+    const add = baseReview.lost.map(x=>({id:x.id, keys:x.keys.filter(k=>!isMeasured(m,k))})).filter(x=>x.keys.length && !allL.includes(x.id));
+    if(add.length){ setCarriedKeys(p=>{ const n={...p}; add.forEach(x=>{ n[x.id]=x.keys; }); return n; }); setCarriedL(p=>[...new Set([...p, ...add.map(x=>x.id)])]); }
+    setLostRestored(true); };
   const setMv = (k,v) => { if(ro) return; setM(p=>({...p,[k]:v, touched:markTouched(p,k)})); };
   // 最大舌圧：JMS舌圧計で3回測定し、入力済みの回の平均を測定値とする（りっぷるくんと同方式）
   const setTongue3 = (i,v) => { if(ro) return; setM(p=>{
@@ -4678,10 +4941,11 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
     const keepDate = (isLoaded && loaded) ? loaded.date : ymdToIso(examDate);
     // v60: 触っていない項目は空欄で保存（画面の初期値は入力を速くするための表示だけ）
     const a=measuredOnly({id:savedId||generateId(),patientId:pid,date:keepDate,type:'adult',
-      checkedLItems:allL,carriedLItems:carriedActive,measurements:m,diagnosis:diag,notes,staffDoctor,staffHygienist}); // v69: 引き継いだ判定も区別して保存
+      checkedLItems:allL,carriedLItems:carriedActive,carriedLKeys:carriedKeysToSave(carriedActive, carriedKeys, m), // v69: 引き継いだ判定も区別して保存（v70: もとの検査も）
+      measurements:m,diagnosis:diag,notes,staffDoctor,staffHygienist});
     const okSave = savedId?updateAssessment(a):addAssessment(a);  // v57: 保存の成否
     if(!savedId && okSave) setSavedId(a.id);
-    if(okSave) dirtyRef.current = false;   // 保存済み＝未保存の変更なし
+    if(okSave){ dirtyRef.current = false; clearDraftIfMine(draftToken.current); }   // 保存済み＝未保存の変更なし（v70: 控えも消す）
     return {id:a.id, ok:okSave};
   };
   // ヘッダ「トップに戻る」：入力途中（未保存・閲覧でない）なら警告、それ以外は即home
@@ -4700,12 +4964,12 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
   // 湿潤度／咬合力／舌圧の入力ブロック（L項目ステップ・再検査画面で共用。v63）
   const renderMoistBlock = () => (
 <div className="ml-7 space-y-2">
-                            <p className="text-xs text-gray-500">口腔湿潤度（ムーカス・3回測定／基準27未満で口腔乾燥）{prevA&&prevA.measurements&&prevA.measurements.oralMoisture?`／前回 ${prevA.measurements.oralMoisture}`:''}</p>
+                            <p className="text-xs text-gray-500">口腔湿潤度（ムーカス・3回測定／基準27未満で口腔乾燥）{lastMeas.oralMoisture?`／前回 ${lastMeas.oralMoisture}`:''}</p>
                             <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 連続3回測定し、その<strong>中央値</strong>を測定値とします（センサーの圧接角度で生じるはずれ値を除くため）。舌背中央部で一定圧・2秒</p>
                             <TestIntervalWarn warn={warnMoist}/>
                             <div className="grid grid-cols-3 gap-2">
                               {[0,1,2].map(i=>(
-                                <SelectNum key={i} label={`${i+1}回目`} unit="" specKey="oralMoisture" value={(m.moist3||['','',''])[i]} onChange={v=>setMoist3(i,v)} disabled={ro} measured={isMeasured(m,'oralMoisture')} suggest={sg('oralMoisture')} suggestLabel="前回"/>
+                                <SelectNum key={i} label={`${i+1}回目`} unit="" specKey="oralMoisture" value={(m.moist3||['','',''])[i]} onChange={v=>setMoist3(i,v)} disabled={ro} free measured={isMeasured(m,'oralMoisture')} suggest={sg('oralMoisture')} suggestLabel="前回"/>
                               ))}
                             </div>
                             <div className={`rounded-xl px-4 py-2.5 text-sm font-medium ${(m.oralMoisture===''||!isMeasured(m,'oralMoisture'))?'bg-gray-50 text-gray-500':parseFloat(m.oralMoisture)<27?'bg-red-50 text-red-700':'bg-green-50 text-green-700'}`}>
@@ -4713,7 +4977,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                               {isMeasured(m,'oralMoisture') && parseFloat(m.oralMoisture)<27 && <span className="ml-2 text-xs">⚠ 基準未満（＜27）→ 口腔乾燥</span>}
                             </div>
                             <MoreBox label="サクソンテストを入力（当院では通常検査しません）" forceOpen={m.saxonTest!==''}>
-                              <div className="w-44"><MeasInput label="サクソンテスト" unit="g/2min" mkey="saxonTest" thr={2} m={m} setM={setMv} disabled={ro} suggest={sg('saxonTest')}/></div>
+                              <div className="w-44"><MeasInput label="サクソンテスト" unit="g/2min" mkey="saxonTest" thr={2} m={m} setM={setMv} disabled={ro} free suggest={sg('saxonTest')}/></div>
                             </MoreBox>
                           </div>
   );
@@ -4729,14 +4993,14 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                             <TestIntervalWarn warn={warnBite}/>
                             <div className="grid grid-cols-2 gap-3">
                               {/* 咬合圧はプルダウンでなく数字キーボードで実測値を直接入力（v56） */}
-                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv} disabled={ro} free placeholder="例）450.5"/>
-                              <MeasInput label="残存歯数" unit="本" mkey="remainingTeeth" thr={20} m={m} setM={setMv} disabled={ro} suggest={sg('remainingTeeth')}/>
+                              <MeasInput label="咬合力" unit="N" mkey="biteForce" thr={m.biteFilter?350:500} m={m} setM={setMv} disabled={ro} free placeholder="例）450.5" suggest={sg('biteForce')}/>
+                              <MeasInput label="残存歯数" unit="本" mkey="remainingTeeth" thr={20} m={m} setM={setMv} disabled={ro} free suggest={sg('remainingTeeth')}/>
                             </div>
                           </div>
   );
   const renderTongueBlock = () => (
 <div className="ml-7 space-y-2">
-                            <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／基準 {ADULT_L5_CUTOFF}kPa未満で低舌圧{tongueCut!==ADULT_L5_CUTOFF?`・同年代の目安 ${tongueCut}kPa`:''}）{prevA&&prevA.measurements&&prevA.measurements.maxTonguePressure?`／前回 ${prevA.measurements.maxTonguePressure}kPa`:''}</p>
+                            <p className="text-xs text-gray-500">最大舌圧（JMS舌圧計・3回測定／基準 {ADULT_L5_CUTOFF}kPa未満で低舌圧{tongueCut!==ADULT_L5_CUTOFF?`・同年代の目安 ${tongueCut}kPa`:''}）{lastMeas.maxTonguePressure?`／前回 ${lastMeas.maxTonguePressure}kPa`:''}</p>
                             <p className="text-[11px] text-gray-500 bg-gray-50 rounded-lg px-2 py-1">📋 最大の力で約7秒保持／最大圧が止まったのを確認して記録。義歯は装着のまま</p>
                             <TestIntervalWarn warn={warnTongue}/>
                             <div className="grid grid-cols-3 gap-2">
@@ -4777,10 +5041,29 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
             <div className="bg-white rounded-2xl shadow-sm p-5">
               <p className="text-base font-bold text-gray-900">🔁 再検査（3か月ごとの再評価）</p>
-              <p className="text-xs text-gray-500 mt-1">点数のある3つの検査（舌圧・咬合圧・口腔粘膜湿潤度）だけ入力します。この3つの判定（L-2・L-3・L-5）は今回の測定値で出し直し、それ以外は前回{retestBase?`（${formatDate(retestBase.date)}）`:''}の判定とメモを引き継いで、新しい記録として保存します。</p>
-              {/* v69: 引き継ぐL項目を具体的に見せる（今回測らない項目の前回の判定＋視診等で付けた判定） */}
-              <p className="text-xs text-gray-600 mt-1">引き継ぐL項目：{(()=>{ const ids=[...new Set([...carriedL,...manualL])].sort(); return ids.length ? ids.map(id=>`${id} ${(L_ITEMS.find(l=>l.id===id)||{}).label||''}`).join('・') : 'なし'; })()}</p>
+              <p className="text-xs text-gray-500 mt-1">点数のある3つの検査（舌圧・咬合圧・口腔粘膜湿潤度）だけ入力します。測った検査の判定は今回の値で出し直し、測らなかった検査の判定とメモは前回{retestBase?`（${formatDate(retestBase.date)}）`:''}から引き継いで、新しい記録として保存します。</p>
+              {/* v69: 引き継ぐL項目を具体的に見せる（今回測らない項目の前回の判定＋視診等で付けた判定）
+                  v70: 測るたびに更新（その判定を出した検査を今回測れば、引き継ぎから外れて今回の値で判定） */}
+              <p className="text-xs text-gray-600 mt-1">前回から引き継ぐL項目：{(()=>{ const ids=[...new Set([...carriedActive,...manualL])].sort(); return ids.length ? ids.map(id=>{
+                const why = manualL.includes(id) ? '手で付けた判定' : carriedCauseText(id, carriedKeys, lastMeas, m);
+                return `${id} ${(L_ITEMS.find(l=>l.id===id)||{}).label||''}${why?`（${why}）`:''}`; }).join('・') : 'なし'; })()}</p>
+              <p className="text-xs font-medium mt-1" style={{color:diag.qualifies?'#b91c1c':'#15803d'}}>今回の判定：L項目 {diag.lItemCount}件{allL.length?`（${[...allL].sort().join('・')}）`:''} → 口腔機能低下症 {diag.qualifies?'該当':'非該当'}（3件以上で該当）</p>
               <p className="text-xs text-gray-400 mt-1">他の項目も見直したいときは「詳しく入力する」へ。</p>
+              {/* v70: 前回の記録が「要確認」（v63〜v69 の不具合で判定が消えた／古い判定が残った可能性）のとき、ここでも知らせる */}
+              {baseReview && (baseReview.lost.length>0 || baseReview.stuck.length>0) && (
+                <div className="mt-2 text-xs bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2 space-y-1.5" data-ro-ok="1">
+                  <p className="font-semibold">⚠ 前回の記録（{formatDate(retestBase.date)}）は「要確認」です（以前の版の不具合の可能性）</p>
+                  {baseReview.lost.length>0 && (
+                    <div>
+                      <p>前回の記録で消えていた判定：{baseReview.lost.map(x=>`${x.id} ${(L_ITEMS.find(l=>l.id===x.id)||{}).label||''}（${x.keys.map(k=>{ const [lb,u]=L_TEST_INFO[k]||[k,'']; const v=lastMeas[k]; return v!=null&&v!==''?`${lb} ${v}${u}`:lb; }).join('・')}）`).join('・')}</p>
+                      {lostRestored
+                        ? <p className="font-medium text-amber-800 mt-1">✓ この再検査に戻しました（「前回から引き継ぐL項目」に入っています）</p>
+                        : !ro && <button type="button" onClick={restoreLost} className="mt-1 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-semibold">この再検査に戻す</button>}
+                    </div>
+                  )}
+                  {baseReview.stuck.length>0 && <p>{baseReview.stuck.join('・')} は前回の記録で基準内なのに付いていました。今回その検査を測れば、今回の値で判定し直します。</p>}
+                </div>
+              )}
             </div>
             <div className="bg-white rounded-2xl shadow-sm p-5 space-y-2"><p className="text-sm font-semibold text-gray-800">L-5 低舌圧 — 舌圧検査</p>{renderTongueBlock()}</div>
             <div className="bg-white rounded-2xl shadow-sm p-5 space-y-2"><p className="text-sm font-semibold text-gray-800">L-3 咬合力低下 — 咬合圧検査</p>{renderBiteBlock()}</div>
@@ -4809,7 +5092,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                     const row = (
                       <div className={`border-t border-gray-50 ${isChecked?'bg-blue-50':''}`}>
                         <CheckRow id={item.id} label={item.label} isAuto={isAuto} checked={isChecked} onChange={()=>toggleML(item.id)} disabled={ro}
-                          detail={`${item.measurement} / 基準:${item.criterion}`+(isAuto&&!manualL.includes(item.id)?'　● 測定値から自動判定（値を直すと変わります）':carriedActive.includes(item.id)?'　↩ 前回の判定を引き継ぎ（今回この検査を測れば測定で判定／タップで外せます）':'')}/>
+                          detail={`${item.measurement} / 基準:${item.criterion}`+(isAuto&&!manualL.includes(item.id)?'　● 測定値から自動判定（値を直すと変わります）':carriedActive.includes(item.id)?`　↩ 前回の判定を引き継ぎ（${carriedCauseText(item.id, carriedKeys, lastMeas, m)||'この検査'}を今回測れば今回の値で判定／タップで外せます）`:'')}/>
                         <div className="px-5 pb-4">
                           {item.id==='L-1' && <div className="ml-7 space-y-2">
                             <p className="text-xs text-gray-500">舌の9分割をタップして舌苔の付着を記録（TCI自動計算）</p>
@@ -4821,20 +5104,20 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
                               </div>
                             </div>
                             <MoreBox label="細菌数レベルを入力（当院では通常検査しません）" forceOpen={m.bacteriaLevel!==''}>
-                              <div className="w-44"><MeasInput label="細菌数レベル" unit="Lv" mkey="bacteriaLevel" thr={4} dir="gte" m={m} setM={setMv} disabled={ro} suggest={sg('bacteriaLevel')}/></div>
+                              <div className="w-44"><MeasInput label="細菌数レベル" unit="Lv" mkey="bacteriaLevel" thr={4} dir="gte" m={m} setM={setMv} disabled={ro} free suggest={sg('bacteriaLevel')}/></div>
                             </MoreBox>
                           </div>}
                           {item.id==='L-2' && renderMoistBlock()}
                           {item.id==='L-3' && renderBiteBlock()}
 {item.id==='L-4' && <div className="ml-7 grid grid-cols-3 gap-3">
-                            <MeasInput label="DDK-パ" unit="回/秒" mkey="ddk_pa" thr={6} m={m} setM={setMv} disabled={ro} suggest={sg('ddk_pa')}/><MeasInput label="DDK-タ" unit="回/秒" mkey="ddk_ta" thr={6} m={m} setM={setMv} disabled={ro} suggest={sg('ddk_ta')}/><MeasInput label="DDK-カ" unit="回/秒" mkey="ddk_ka" thr={6} m={m} setM={setMv} disabled={ro} suggest={sg('ddk_ka')}/>
+                            <MeasInput label="DDK-パ" unit="回/秒" mkey="ddk_pa" thr={6} m={m} setM={setMv} disabled={ro} free suggest={sg('ddk_pa')}/><MeasInput label="DDK-タ" unit="回/秒" mkey="ddk_ta" thr={6} m={m} setM={setMv} disabled={ro} free suggest={sg('ddk_ta')}/><MeasInput label="DDK-カ" unit="回/秒" mkey="ddk_ka" thr={6} m={m} setM={setMv} disabled={ro} free suggest={sg('ddk_ka')}/>
                           </div>}
                           {item.id==='L-5' && renderTongueBlock()}
-{item.id==='L-6' && <div className="ml-7"><MeasInput label="グルコース濃度" unit="mg/dL" mkey="masticationScore" thr={100} m={m} setM={setMv} disabled={ro} suggest={sg('masticationScore')}/></div>}
+{item.id==='L-6' && <div className="ml-7"><MeasInput label="グルコース濃度" unit="mg/dL" mkey="masticationScore" thr={100} m={m} setM={setMv} disabled={ro} free suggest={sg('masticationScore')}/></div>}
                           {item.id==='L-7' && <div className="ml-7 space-y-3">
                             <p className="text-xs font-medium text-gray-600">EAT-10（嚥下スクリーニング質問票）</p>
                             <EAT10 answers={m.eatAnswers} onChange={setEat} disabled={ro}/>
-                            <div className="w-44"><MeasInput label="RSST（反復唾液嚥下）" unit="回/30秒" mkey="rsst" thr={3} m={m} setM={setMv} disabled={ro} suggest={sg('rsst')}/></div>
+                            <div className="w-44"><MeasInput label="RSST（反復唾液嚥下）" unit="回/30秒" mkey="rsst" thr={3} m={m} setM={setMv} disabled={ro} free suggest={sg('rsst')}/></div>
                           </div>}
                         </div>
                       </div>
@@ -4865,7 +5148,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
             <div className="bg-white rounded-2xl shadow-sm p-5">
               <h2 className="font-semibold text-gray-800 mb-1">📊 お口の機能バランス{prevA && <span className="text-xs font-normal text-gray-400 ml-2">前回（{formatDate(prevA.date)}）との比較</span>}</h2>
               <div className="flex justify-center">
-                <FnRadar scores={computeFnScores({measurements:m, checkedLItems:allL})}
+                <FnRadar scores={computeFnScores({measurements:mMeasured, checkedLItems:allL})}
                   prev={prevA ? computeFnScores(prevA) : null}/>
               </div>
             </div>
@@ -4891,7 +5174,7 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
               })}
             </div>
             {(()=>{
-              const tr = prescribeAdultTrainings(allL, m);
+              const tr = prescribeAdultTrainings(allL, mMeasured);
               if (tr.length===0) return null;
               return (
                 <div className="bg-white rounded-2xl shadow-sm p-5 space-y-3">
@@ -4933,10 +5216,10 @@ function AdultFlow({patientId:initPid, assessmentId, mode}) {
       </div>
       {/* 担当者選択ポップ（新規評価で患者選択直後のみ。読込時・閲覧時は出さない） */}
       {showStaff && !isLoaded && !ro && (
-        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff} onCancel={()=>nav(pid?{p:'history',patientId:pid,returnTo:'adult'}:{p:'home'})}/>
+        <StaffSelectModal docList={docList} hygList={hygList} doc={tmpDoc} setDoc={setTmpDoc} hyg={tmpHyg} setHyg={setTmpHyg} date={tmpDate} setDate={setTmpDate} onConfirm={confirmStaff} onCancel={()=>{ clearDraftIfMine(draftToken.current); nav(pid?{p:'history',patientId:pid,returnTo:'adult'}:{p:'home'}); }}/>
       )}
       {/* 入力途中の戻る警告 */}
-      {showBackWarn && <UnsavedBackModal onLeave={()=>goLeave(showBackWarn)} onStay={()=>setShowBackWarn(null)} isEdit={!!savedId}
+      {showBackWarn && <UnsavedBackModal onLeave={()=>{ clearDraftIfMine(draftToken.current); goLeave(showBackWarn); }} onStay={()=>setShowBackWarn(null)} isEdit={!!savedId}
         onSaveLeave={()=>{ if(!doSave().ok) return; showToast(savedId?'保存しました':'一時保存しました'); goLeave(showBackWarn); }}/>}
       {/* 閲覧モード中に項目へ触れた→変更確認（v55） */}
       {askEdit && <EditConfirmModal onEdit={()=>{setRo(false);setAskEdit(false);}} onCancel={()=>setAskEdit(false)}/>}
@@ -5006,8 +5289,8 @@ function History({patientId, returnTo}) {
                   {isPed && a.scoring && <p className={`text-xs font-medium ${a.scoring.qualifies?'text-green-700':'text-gray-500'}`}>算定: {a.scoring.qualifies?'✓ 満たしている':'✗ 未達'} / C項目 {a.checkedCItems.length}件</p>}
                   {!isPed && a.diagnosis && <p className={`text-xs font-medium ${a.diagnosis.qualifies?'text-red-700':'text-green-700'}`}>低下症: {a.diagnosis.qualifies?'⚠ 疑い':'✓ 非該当'} / L項目 {a.diagnosis.lItemCount}件</p>}
                   {/* v69: 再検査の判定の不具合（v63〜v68）で誤って保存された可能性のある記録を知らせる。開いて「変更する」→L項目を見直して保存すると消える */}
-                  {!isPed && (()=>{ const pv = assessments.filter(x=>x.type==='adult' && x.id!==a.id && new Date(x.date)<new Date(a.date)).sort((x,y)=>new Date(y.date)-new Date(x.date))[0];
-                    const notes = retestReviewNotes(a, pv);
+                  {!isPed && (()=>{ const adultSorted = assessments.filter(x=>x.type==='adult').sort(newestFirst); // v70: 同じ日の記録も保存順で前後を決める
+                    const notes = retestReviewNotes(a, adultSorted.slice(adultSorted.findIndex(x=>x.id===a.id)+1));
                     return notes.length ? <p className="text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">⚠ 要確認：{notes.join('／')}</p> : null; })()}
                   {isPed && a.diagnosis?.matchedPatterns?.length>0 && (
                     <div className="flex flex-wrap gap-1">
@@ -5020,7 +5303,7 @@ function History({patientId, returnTo}) {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={e=>{e.stopPropagation();nav({p:'print',assessmentId:a.id});}} className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg" title="印刷">🖨️</button>
+                  <button onClick={e=>{e.stopPropagation();nav({p:'print',assessmentId:a.id,from:'history'});}} className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg" title="印刷">🖨️</button>
                   <button onClick={e=>{e.stopPropagation();setDelA(a);}} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="削除">🗑️</button>
                 </div>
               </div>
@@ -5149,7 +5432,7 @@ function BillingMemo({a, patient, age, isPed}){
 // ═══════════════════════════════════════════════
 // PAGE: PRINT PREVIEW
 // ═══════════════════════════════════════════════
-function PrintPreview({assessmentId}) {
+function PrintPreview({assessmentId, from}) {
   const nav = useNav();
   const {getAssessment, getPatient, clinic, assessments} = useS();
   // v58: 'both'=まとめて印刷（お知らせ1部＋管理計画書2部・B5）。院内では毎回この2つを続けて印刷するため既定にした
@@ -5165,7 +5448,9 @@ function PrintPreview({assessmentId}) {
   // 前回の評価（同一患者・同一種別・今回より前の日付で最新）
   const prevA = measuredOnly(assessments
     .filter(x=>x.patientId===a.patientId && x.type===a.type && x.id!==a.id && new Date(x.date)<new Date(a.date))
-    .sort((x,y)=>new Date(y.date)-new Date(x.date))[0] || null);
+    .sort(newestFirst)[0] || null);
+  // v70: 引き継いだ判定の「もとの値」（前回の記録に無ければ、さらに前の記録で最後に測った値）
+  const prevVals = a.type==='adult' ? latestMeasuredValues(assessments.filter(x=>x.patientId===a.patientId && x.type==='adult' && x.id!==a.id && new Date(x.date)<new Date(a.date))) : null;
   // 生年月日の和暦表示（管理計画書用）
   const [by,bm,bdd] = patient.birth.split('-').map(Number);
   const bw = toWareki(by);
@@ -5209,7 +5494,7 @@ function PrintPreview({assessmentId}) {
         : isPlan
           ? (isPed
               ? <PlanPediatric a={a} patient={patient} ageYears={age.years} prev={prevA} clinic={clinic}/>
-              : <PlanAdult a={a} prev={prevA} clinic={clinic}/>)
+              : <PlanAdult a={a} prev={prevA} clinic={clinic} prevVals={prevVals}/>)
           : (isPed
               ? <PrintPediatric a={a} ageYears={age.years} patientName={patient.name} prev={prevA}/>
               : <PrintAdult a={a} patientName={patient.name} prev={prevA}/>)}
@@ -5233,7 +5518,8 @@ function PrintPreview({assessmentId}) {
   return (
     <div className="min-h-screen bg-gray-100">
       <div className="bg-white shadow-sm px-6 py-4 flex items-center gap-3 flex-wrap no-print">
-        <button onClick={()=>nav(isPed?{p:'pediatric',patientId:patient.id,assessmentId}:{p:'adult',patientId:patient.id,assessmentId})}
+        {/* v70: 記録一覧から開いた印刷画面の「戻る」は閲覧モードで開く（以前はいきなり編集できる状態で、変更の確認が出なかった） */}
+        <button onClick={()=>{ const md = from==='history' ? 'view' : undefined; nav(isPed?{p:'pediatric',patientId:patient.id,assessmentId,mode:md}:{p:'adult',patientId:patient.id,assessmentId,mode:md}); }}
           className="text-blue-600 flex items-center gap-1 text-sm font-medium whitespace-nowrap flex-shrink-0">◀ {isPed?'トレーニング処方に戻る':'L項目・検査に戻る'}</button>
         <h1 className="text-lg font-bold text-gray-900 flex-1 whitespace-nowrap">印刷プレビュー</h1>
         <div className="flex rounded-xl overflow-hidden border border-gray-200">
@@ -5365,13 +5651,18 @@ function PrintAdult({a, patientName, prev}) {
   const trainings = prescribeAdultTrainings(a.checkedLItems||[], a.measurements||{});
   const scores = computeFnScores(a);
   const prevScores = prev ? computeFnScores(prev) : null;
+  // v70: 一部の検査だけ（再検査など）で該当なしのときは「良好です」と言い切らない
+  const partial = scores.some(s=>!s.measured && !s.weak);
+  const measuredN = scores.filter(s=>s.measured).length;
+  const headline = diagnosis?.qualifies ? '⚠ お口の機能の低下がみられます'
+    : (partial && ngCount===0) ? '✓ 今回測った項目では、基準を下回ったものはありませんでした' : '✓ お口の機能は良好です';
   return (
     <div>
       <div style={{background:diagnosis?.qualifies?'#fff1f2':'#f0fdf4',border:`2px solid ${diagnosis?.qualifies?'#fca5a5':'#86efac'}`,borderRadius:'12px',padding:'12px',textAlign:'center',marginBottom:'12px'}}>
         <p style={{fontSize:'17px',fontWeight:'700',color:diagnosis?.qualifies?'#991b1b':'#166534'}}>
-          {diagnosis?.qualifies?'⚠ お口の機能の低下がみられます':'✓ お口の機能は良好です'}
+          {headline}
         </p>
-        <p style={{fontSize:'12px',marginTop:'3px',color:diagnosis?.qualifies?'#dc2626':'#16a34a'}}>気になる項目：7項目中 {ngCount}項目</p>
+        <p style={{fontSize:'12px',marginTop:'3px',color:diagnosis?.qualifies?'#dc2626':'#16a34a'}}>気になる項目：7項目中 {ngCount}項目{partial?`（今回測った項目：${measuredN}項目）`:''}</p>
       </div>
       <Section title={prev?`お口の機能バランス（前回 ${formatDate(prev.date)} との比較）`:'お口の機能バランス（基準ラインと比べて）'}>
         <div style={{display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
@@ -5394,7 +5685,7 @@ function PrintAdult({a, patientName, prev}) {
             })}
           </div>
         </div>
-        <p style={{fontSize:'10px',color:'#888',marginTop:'4px'}}>オレンジの点線が「基準ライン」です。線の内側にへこんでいる項目が、平均より弱めのところです。{prev && '灰色の点線は前回の結果です。'}</p>
+        <p style={{fontSize:'10px',color:'#888',marginTop:'4px'}}>オレンジの点線が「基準ライン」です。線の内側にへこんでいる項目が、平均より弱めのところです。{prev && '灰色の点線は前回の結果です。'}{partial && '白い丸（未検査）は今回測っていない項目です。'}</p>
       </Section>
       {a.notes && <Section title="歯科医院からのひとこと"><p style={{fontSize:'13px',color:'#374151',background:'#f8fafc',borderRadius:'10px',padding:'10px 14px',whiteSpace:'pre-line'}}>{a.notes}</p></Section>}
       <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:'10px',padding:'10px 14px',marginTop:'8px'}}>
@@ -5454,8 +5745,9 @@ function NoteTemplates({kind, notes, setNotes}){
 }
 
 function reEvalLabel(dateStr){
-  const d = new Date(dateStr); d.setMonth(d.getMonth()+3);
-  return `${d.getFullYear()}年${d.getMonth()+1}月頃（約3か月後）`;
+  // v70: 年月だけで3か月後を出す（以前は setMonth の桁あふれで、8/31→12月頃・11/30→3月頃と1か月ずれていた）
+  const d = new Date(dateStr); const t = new Date(d.getFullYear(), d.getMonth()+3, 1);
+  return `${t.getFullYear()}年${t.getMonth()+1}月頃（約3か月後）`;
 }
 // 管理方針・目標＋署名欄（小児・成人共通）
 function PlanFooter({a, clinic, trainingsLabel}){
@@ -5498,10 +5790,14 @@ function PlanFooter({a, clinic, trainingsLabel}){
 const PT_TH = {border:'1px solid #9ca3af',padding:'3px 6px',background:'#f3f4f6',fontSize:'10px',fontWeight:'600',color:'#374151',textAlign:'left'};
 const PT_TD = {border:'1px solid #9ca3af',padding:'3px 6px',fontSize:'10.5px',color:'#111'};
 
-function PlanAdult({a, prev, clinic}){
+function PlanAdult({a, prev, clinic, prevVals}){
   const m = a.measurements||{};
   const pm = prev ? (prev.measurements||{}) : null;
   const checked = new Set(a.checkedLItems||[]);
+  // v70: 前回の判定を引き継いだ項目（今回その検査を測っていない）。カルテで「なぜ該当か」が分かるよう印と注記を付ける
+  let autoA = []; try { autoA = computeMeasurementLItems(m); } catch(e){ autoA = []; }
+  const carried = new Set((Array.isArray(a.carriedLItems) ? a.carriedLItems : []).filter(id=>checked.has(id) && !autoA.includes(id))); // 今回の測定でも該当なら「今回」扱い
+  const carriedNote = [...carried].sort().map(id=>{ const why = carriedCauseText(id, a.carriedLKeys, prevVals||pm||{}); return `${id}${why?`（${why}）`:''}`; }).join('・');
   const v = (x,suffix='') => (x!=null && x!=='') ? `${x}${suffix}` : '未検査';
   const rows = [
     {id:'L-1', name:'口腔衛生状態不良', test:'TCI（舌苔の付着度）', val:v(m.tciScore,'%'), pv:pm?v(pm.tciScore,'%'):null, crit:'50%以上'},
@@ -5536,13 +5832,14 @@ function PlanAdult({a, prev, clinic}){
                   {prev && <td style={{...PT_TD,textAlign:'center',color:'#6b7280'}}>{r.pv}</td>}
                   <td style={{...PT_TD,textAlign:'center',fontWeight:'600'}}>{r.val}</td>
                   <td style={{...PT_TD,fontSize:'9.5px',color:'#4b5563',whiteSpace:'nowrap'}}>{r.crit}</td>
-                  <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:hit?'#dc2626':'#16a34a'}}>{hit?'該当':'—'}</td>
+                  <td style={{...PT_TD,textAlign:'center',fontWeight:'700',color:hit?'#dc2626':'#16a34a',whiteSpace:'nowrap'}}>{hit?'該当':'—'}{hit && carried.has(r.id) && <span style={{fontSize:'8.5px',fontWeight:'600',color:'#6b7280'}}><br/>前回から</span>}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
         {prev && <p style={{fontSize:'9px',color:'#888',marginTop:'3px'}}>前回：{formatDate(prev.date)}</p>}
+        {carriedNote && <p style={{fontSize:'9px',color:'#555',marginTop:'2px'}}>「前回から」＝今回その検査を測っていないため、前回までの判定を引き継いだ項目：{carriedNote}</p>}
       </Section>
       <div style={{display:'flex',gap:'8px',alignItems:'stretch',margin:'10px 0'}}>
         <div style={{flex:1,border:'2px solid '+(a.diagnosis?.qualifies?'#fca5a5':'#86efac'),borderRadius:'8px',padding:'7px 12px',background:a.diagnosis?.qualifies?'#fff1f2':'#f0fdf4'}}>
@@ -5678,15 +5975,20 @@ function App() {
 
   // 起動時に一度だけ：参照されていない孤児写真をIndexedDBから掃除（取りこぼし回収）
   useEffect(()=>{ sweepOrphanPhotos(); }, []);
+  // v70: 新しい版が届いたとき、入力途中（未保存）なら読み直しを待つ（公開用の組み立てで足す仕組みが知らせてくる）。
+  //      トップ画面に戻ったら読み直す。以前は届いた瞬間に読み直して、入力中のデータが消えることがあった
+  const [updWaiting, setUpdWaiting] = useState(false);
+  useEffect(()=>{ const h=()=>setUpdWaiting(true); window.addEventListener('oral-update-waiting', h); return ()=>window.removeEventListener('oral-update-waiting', h); }, []);
+  useEffect(()=>{ if(window.__oralPendingReload && page.p==='home'){ window.__oralPendingReload=false; try { location.reload(); } catch(_){} } }, [page]);
 
   const renderPage = () => {
     switch(page.p) {
       case 'home': return <Home/>;
       case 'settings': return <Settings/>;
       case 'patientForm': return <PatientForm patientId={page.patientId} returnTo={page.returnTo}/>;
-      case 'pediatric': return <PediatricFlow patientId={page.patientId} assessmentId={page.assessmentId} mode={page.mode}/>;
-      case 'adult': return <AdultFlow patientId={page.patientId} assessmentId={page.assessmentId} mode={page.mode}/>;
-      case 'print': return <PrintPreview assessmentId={page.assessmentId}/>;
+      case 'pediatric': return <PediatricFlow patientId={page.patientId} assessmentId={page.assessmentId} mode={page.mode} draft={page.draft}/>;
+      case 'adult': return <AdultFlow patientId={page.patientId} assessmentId={page.assessmentId} mode={page.mode} draft={page.draft}/>;
+      case 'print': return <PrintPreview assessmentId={page.assessmentId} from={page.from}/>;
       case 'history': return <History patientId={page.patientId} returnTo={page.returnTo}/>;
       default: return <Home/>;
     }
@@ -5699,6 +6001,7 @@ function App() {
           <div className="min-h-screen bg-gray-50">
             {renderPage()}
             {toast && <div className="no-print fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] bg-green-600 text-white px-6 py-3 rounded-2xl shadow-lg text-sm font-semibold pointer-events-none">✅ {toast}</div>}
+            {updWaiting && page.p!=='home' && <div className="no-print fixed bottom-4 left-4 z-[55] max-w-xs bg-blue-600 text-white px-4 py-2 rounded-xl shadow-lg text-xs">🆕 新しい版が届いています。入力を保存してトップ画面に戻ると切り替わります</div>}
           </div>
         </ToastCtx.Provider>
       </NavCtx.Provider>
@@ -5931,14 +6234,84 @@ function runSelfTests(){
   // --- v69: 全体点検（Opus 5.5）で見つけた不具合の回帰テスト ---
   // 1番：再検査の引き継ぎ（旧記録＝touched無し／v57以降の記録）
   const oldBase = {type:'adult', checkedLItems:['L-2','L-3','L-5'], measurements:{maxTonguePressure:'25', biteForce:'300', biteFilter:true, oralMoisture:'26.0'}};
-  t('v69: 旧記録の再検査で測り直す3項目は引き継がない', splitRetestLItems(oldBase), {manual:[], carried:[]});
+  // v70: 3項目も「もとの検査」付きで引き継ぐ形に改めた（測り直せば今回の値で判定＝v69と同じ結果）
+  t('v69→v70: 旧記録の再検査：3項目は「もとの検査」（湿潤度・咬合力・舌圧）付きで引き継ぐ', splitRetestLItems(oldBase),
+    {manual:[], carried:['L-2','L-3','L-5'], carriedKeys:{'L-2':['oralMoisture'],'L-3':['biteForce'],'L-5':['maxTonguePressure']}});
   const oldBase2 = {type:'adult', checkedLItems:['L-1','L-5','L-6'], measurements:{tciScore:'55', maxTonguePressure:'25'}};
-  t('v69: 旧記録の再検査で測らないL-1は引き継ぎ・手で付けたL-6は手動のまま', splitRetestLItems(oldBase2), {manual:['L-6'], carried:['L-1']});
+  t('v69: 旧記録の再検査で測らないL-1は引き継ぎ・手で付けたL-6は手動のまま', splitRetestLItems(oldBase2),
+    {manual:['L-6'], carried:['L-1','L-5'], carriedKeys:{'L-1':['tciScore'],'L-5':['maxTonguePressure']}});
   const newBase = {type:'adult', checkedLItems:['L-1','L-4','L-5'], measurements:{touched:['tciScore','ddk_pa','ddk_ta','ddk_ka','maxTonguePressure'], tciScore:'61', ddk_pa:'5.5', ddk_ta:'6.2', ddk_ka:'6.1', maxTonguePressure:'25.0'}};
-  t('v69: 再検査で測らないL-1・L-4は前回の判定を引き継ぐ（以前は消えて非該当になった）', splitRetestLItems(newBase), {manual:[], carried:['L-1','L-4']});
-  t('v69: 検査なしで手で付けたL-3は手動として引き継ぐ', splitRetestLItems({type:'adult', checkedLItems:['L-3'], measurements:{touched:[]}}), {manual:['L-3'], carried:[]});
+  t('v69: 再検査で測らないL-1・L-4は前回の判定を引き継ぐ（v70: L-4のもとは「パ」だけ）', splitRetestLItems(newBase),
+    {manual:[], carried:['L-1','L-4','L-5'], carriedKeys:{'L-1':['tciScore'],'L-4':['ddk_pa'],'L-5':['maxTonguePressure']}});
+  t('v69: 検査なしで手で付けたL-3は手動として引き継ぐ', splitRetestLItems({type:'adult', checkedLItems:['L-3'], measurements:{touched:[]}}), {manual:['L-3'], carried:[], carriedKeys:{}});
   const retest1 = {type:'adult', checkedLItems:['L-1','L-4','L-5'], carriedLItems:['L-1','L-4'], measurements:{touched:['maxTonguePressure','biteForce','oralMoisture'], maxTonguePressure:'26.0', biteForce:'400', biteFilter:true, oralMoisture:'28.0'}};
-  t('v69: 2回目の再検査でも、1回目が引き継いだL-1・L-4は「検査由来」のまま引き継ぐ（手動扱いにしない）', splitRetestLItems(retest1), {manual:[], carried:['L-1','L-4']});
+  t('v69: 2回目の再検査でも、1回目が引き継いだL-1・L-4は「検査由来」のまま引き継ぐ（v69の記録＝もとの検査は不明扱い）', splitRetestLItems(retest1),
+    {manual:[], carried:['L-1','L-4','L-5'], carriedKeys:{'L-5':['maxTonguePressure']}});
+  // v70: 前回「残存歯数16本」で付いたL-3が、咬合力だけ測った再検査で外れて「非該当」になっていた
+  const aug = {type:'adult', date:'2026-08-05T03:00:00.000Z', checkedLItems:['L-1','L-3','L-5'], measurements:{touched:['tciScore','remainingTeeth','biteForce','maxTonguePressure'], tciScore:'61', remainingTeeth:'16', biteForce:'420', biteFilter:true, maxTonguePressure:'25.0'}};
+  const spA = splitRetestLItems(aug);
+  t('v70: 前回のL-3のもとは「残存歯数16本」（咬合力420は基準内）と見分ける', spA,
+    {manual:[], carried:['L-1','L-3','L-5'], carriedKeys:{'L-1':['tciScore'],'L-3':['remainingTeeth'],'L-5':['maxTonguePressure']}});
+  const rtM = {touched:['maxTonguePressure','biteForce','oralMoisture'], maxTonguePressure:'26.0', biteForce:'430', biteFilter:true, oralMoisture:'28.0'};
+  const lOf = (sp, mm) => [...new Set([...computeMeasurementLItems(mm), ...activeCarried(sp.carried, sp.carriedKeys, mm)])].sort();
+  t('v70: 咬合力だけ測って残存歯数を入れなくても、前回の残存歯数で付いたL-3は残る（v69は外れて3→2件＝非該当）', lOf(spA, rtM), ['L-1','L-3','L-5']);
+  t('v70: 残存歯数を今回入れれば今回の値で判定（22本→L-3は外れる）', lOf(spA, {...rtM, touched:[...rtM.touched,'remainingTeeth'], remainingTeeth:'22'}), ['L-1','L-5']);
+  t('v70: 残存歯数を今回入れて16本のまま→L-3は測定で該当', lOf(spA, {...rtM, touched:[...rtM.touched,'remainingTeeth'], remainingTeeth:'16'}), ['L-1','L-3','L-5']);
+  t('v70: 舌圧を測り直して32kPa→L-5は外れる（測り直した項目は今回の値で出し直す）', lOf(spA, {...rtM, maxTonguePressure:'32.0'}), ['L-1','L-3']);
+  t('v70: 舌圧を測らなかったときは前回のL-5を引き継ぐ（v69は黙って消えた）', lOf(spA, {touched:['biteForce','oralMoisture'], biteForce:'430', biteFilter:true, oralMoisture:'28.0'}), ['L-1','L-3','L-5']);
+  t('v70: 保存する「もとの検査」はまだ測り直していないものだけ', carriedKeysToSave(activeCarried(spA.carried, spA.carriedKeys, rtM), spA.carriedKeys, rtM), {'L-1':['tciScore'],'L-3':['remainingTeeth']});
+  const rt1 = {type:'adult', date:'2026-09-25T03:00:00.000Z', checkedLItems:['L-1','L-3','L-5'], carriedLItems:['L-1','L-3'], carriedLKeys:{'L-1':['tciScore'],'L-3':['remainingTeeth']}, measurements:rtM};
+  t('v70: 2回目の再検査でも「もとの検査」を引き継ぐ（残存歯数を入れるまでL-3は残る）', splitRetestLItems(rt1),
+    {manual:[], carried:['L-1','L-3','L-5'], carriedKeys:{'L-1':['tciScore'],'L-3':['remainingTeeth'],'L-5':['maxTonguePressure']}});
+  const spB = splitRetestLItems({type:'adult', checkedLItems:['L-3'], measurements:{touched:['biteForce','remainingTeeth'], biteForce:'300', biteFilter:true, remainingTeeth:'16'}});
+  t('v70: 咬合力も残存歯数も原因だったL-3は、咬合力が戻っても残存歯数を入れるまで残る', [spB.carriedKeys['L-3'], lOf(spB, {touched:['biteForce'], biteForce:'400', biteFilter:true})], [['biteForce','remainingTeeth'], ['L-3']]);
+  t('v70: もとの検査が分からない v69 の記録は従来どおり（その項目の検査をどれか測れば外れる）',
+    [activeCarried(['L-1'], {}, {touched:[]}), activeCarried(['L-1'], {}, {touched:['bacteriaLevel'], bacteriaLevel:'2'})], [['L-1'], []]);
+  t('v70: 正しく引き継いだL-3（咬合力は基準内）に「要確認」を出さない', retestReviewNotes(rt1, [aug]), []);
+  t('v70: 前の記録を渡しても同じ（最後に測った値でさかのぼる）', splitRetestLItems(rt1, [aug]),
+    {manual:[], carried:['L-1','L-3','L-5'], carriedKeys:{'L-1':['tciScore'],'L-3':['remainingTeeth'],'L-5':['maxTonguePressure']}});
+  t('v70: もとの検査の値が消されていても、v70の記録が覚えている「もとの検査」で引き継ぐ', splitRetestLItems(rt1).carriedKeys['L-3'], ['remainingTeeth']);
+  // v70（敵対検証の指摘）：v63〜v68 の記録（引き継ぎの区別が無い）を土台にしても、各記録の検査値から正しく分ける
+  const old610 = {type:'adult', date:'2026-06-10T03:00:00.000Z', checkedLItems:['L-1','L-4','L-5'], measurements:{tciScore:'61', ddk_pa:'5.5', ddk_ta:'6.2', ddk_ka:'6.1', maxTonguePressure:'25', biteFilter:true}};
+  const v67rt = {type:'adult', date:'2026-09-12T03:00:00.000Z', checkedLItems:['L-1','L-4','L-5'], measurements:{touched:['maxTonguePressure','biteForce','oralMoisture'], maxTonguePressure:'26.0', biteForce:'450', biteFilter:true, oralMoisture:'28.0'}};
+  const spL = splitRetestLItems(v67rt, [old610]);
+  t('v70: v63〜v68の再検査記録が土台でも、L-1・L-4は6月の検査値から「引き継ぎ」と分ける（以前は手で付けた判定＝外れなかった）', spL,
+    {manual:[], carried:['L-1','L-4','L-5'], carriedKeys:{'L-1':['tciScore'],'L-4':['ddk_pa'],'L-5':['maxTonguePressure']}});
+  t('v70: その土台から、詳しく入力で舌苔0%・パタカ基準内・舌圧27を測る→L-5だけ（以前は3件該当のまま）',
+    lOf(spL, {touched:['tciScore','ddk_pa','ddk_ta','ddk_ka','maxTonguePressure'], tciScore:'0', ddk_pa:'6.5', ddk_ta:'6.6', ddk_ka:'6.4', maxTonguePressure:'27.0'}), ['L-5']);
+  const jul = {type:'adult', date:'2026-07-01T03:00:00.000Z', checkedLItems:['L-3'], measurements:{remainingTeeth:'16', biteForce:'420', biteFilter:true}};
+  const v66rt = {type:'adult', date:'2026-09-15T03:00:00.000Z', checkedLItems:['L-3'], measurements:{touched:['biteForce'], biteForce:'430', biteFilter:true}};
+  t('v70: 残存歯数由来のL-3を残した旧記録に、誤った「要確認（基準内なのに付いている）」を出さない', retestReviewNotes(v66rt, [jul]), []);
+  t('v70: その記録を土台にした再検査でもL-3は残存歯数由来で引き継ぐ', splitRetestLItems(v66rt, [jul]).carriedKeys['L-3'], ['remainingTeeth']);
+  const aug2 = {type:'adult', date:'2026-08-01T03:00:00.000Z', checkedLItems:['L-1','L-3','L-5'], measurements:{touched:['tciScore','remainingTeeth','maxTonguePressure'], tciScore:'61', remainingTeeth:'16', maxTonguePressure:'25.0'}};
+  const v65rt = {type:'adult', date:'2026-09-12T03:00:00.000Z', checkedLItems:[], measurements:{touched:['biteForce','oralMoisture'], biteForce:'430', biteFilter:true, oralMoisture:'28.0'}};
+  t('v70: 咬合力だけ測って残存歯数由来のL-3・測らなかった舌圧のL-5が消えた記録を「要確認」で見つける（以前はL-1だけ）',
+    retestReview(v65rt, [aug2]).lost.map(x=>x.id), ['L-1','L-3','L-5']);
+  t('v70: 何も測らずに保存した再検査の記録も見つける', retestReview({...v65rt, measurements:{touched:[]}}, [aug2]).lost.map(x=>x.id), ['L-1','L-3','L-5']);
+  t('v70: 測り直して基準内に戻った判定は「消えた」に数えない', retestReview({...v65rt, measurements:{touched:['maxTonguePressure','remainingTeeth'], maxTonguePressure:'33.0', remainingTeeth:'22'}}, [aug2]).lost.map(x=>x.id), ['L-1']);
+  t('v70: v70以降で保存した記録（もとの検査を持つ）は要確認の対象外（外れているのは意図して外したもの）', retestReviewNotes({...v65rt, carriedLKeys:{}}, [aug2]), []);
+  const jul32 = {type:'adult', date:'2026-07-10T03:00:00.000Z', checkedLItems:['L-5'], measurements:{touched:['maxTonguePressure'], maxTonguePressure:'32.0'}};
+  const spJ = splitRetestLItems(jul32, []);
+  t('v70: 旧基準（年齢性別35kPa）で付いたL-5（舌圧32）は手で付けた判定にしない', [spJ.manual, spJ.carriedKeys['L-5']], [[], ['maxTonguePressure']]);
+  t('v70: その方が舌圧40を測る→L-5は外れる（以前はずっと残った）', lOf(spJ, {touched:['maxTonguePressure'], maxTonguePressure:'40.0'}), []);
+  t('v70: 数字欄「.」だけは未入力（以前は測った扱い）', [cleanNum('.'), cleanNum('．'), cleanNum('..')], ['', '', '']);
+  t('v70: 同じ日の記録は後から保存した方を新しいとみなす', [{id:'a',date:'2026-09-20T03:00:00.000Z',updatedAt:'2026-09-20T01:00:00Z'},{id:'b',date:'2026-09-20T03:00:00.000Z',updatedAt:'2026-09-20T02:00:00Z'}].sort(newestFirst).map(x=>x.id), ['b','a']);
+  tOk('v70: 壊れた記録でも止まらない（L項目が配列でない・関係ない名前）', (()=>{ try { splitRetestLItems({type:'adult', checkedLItems:'L-1', measurements:{}});
+    retestReviewNotes({...v65rt, checkedLItems:'x'}, [{type:'adult', checkedLItems:['constructor','L-9']}]); retestReviewNotes(v65rt, [{type:'adult', checkedLItems:'constructor'}]);
+    activeCarried(['constructor'], {constructor:['x']}, {}); return true; } catch(e){ return false; } })());
+  // v70（2回目の反証の指摘）
+  const idAt = ms => ms.toString(36) + 'zz';
+  const sameDay = [{id:idAt(Date.UTC(2026,8,20,1)), date:'2026-09-20T03:00:00.000Z', updatedAt:'2026-09-21T00:00:00Z'}, {id:idAt(Date.UTC(2026,8,20,2)), date:'2026-09-20T03:00:00.000Z', updatedAt:'2026-09-20T02:00:00Z'}];
+  t('v70: 同じ日の2件は後から作った方が新しい（先に作った方を保存し直しても入れ替わらない）', [...sameDay].sort(newestFirst).map(x=>x===sameDay[1]?'後':'先'), ['後','先']);
+  const v69rm = {type:'adult', date:'2026-09-25T03:00:00.000Z', checkedLItems:['L-5'], carriedLItems:[], measurements:{touched:['maxTonguePressure','biteForce','oralMoisture'], maxTonguePressure:'26.0', biteForce:'430', biteFilter:true, oralMoisture:'28.0'}};
+  t('v70: v69で保存した記録で、タップで外したL-1には「要確認」を出さない（v69の穴で消えたL-3だけ出す）', retestReview(v69rm, [aug]).lost.map(x=>x.id), ['L-3']);
+  const oldGlu = {type:'adult', date:'2026-03-01T03:00:00.000Z', checkedLItems:['L-6'], measurements:{touched:['masticationScore'], masticationScore:'80'}};
+  const v70man = {type:'adult', date:'2026-09-25T03:00:00.000Z', checkedLItems:['L-6'], carriedLItems:[], carriedLKeys:{}, measurements:{touched:[]}};
+  t('v70: v70で「手で付けた判定」（所見）は、昔の検査値があっても手動のまま引き継ぐ', splitRetestLItems(v70man, [oldGlu]), {manual:['L-6'], carried:[], carriedKeys:{}});
+  t('v70: 旧版の記録なら昔の検査値から引き継ぎと分ける（区別が保存されていないため）', splitRetestLItems({...v70man, carriedLItems:undefined, carriedLKeys:undefined}, [oldGlu]).carriedKeys['L-6'], ['masticationScore']);
+  t('v70: 引き継ぎの説明に前回の値を出す', carriedCauseText('L-3', rt1.carriedLKeys, latestMeasuredValues([aug, rt1])), '残存歯数 16本');
+  t('v70: 過去の記録を新しい順にたどって最後に測った値を集める', [latestMeasuredValues([aug, rt1]).remainingTeeth, latestMeasuredValues([aug, rt1]).maxTonguePressure], ['16', '26.0']);
+  tOk('v70: 保存時の実測だけ処理で「もとの検査」が消えない', (measuredOnly({...rt1}).carriedLKeys||{})['L-3'] && measuredOnly({...rt1}).carriedLKeys['L-3'][0]==='remainingTeeth');
   // 5番：1歳半をまたいだ小児の再検査
   t('v69: 別紙1の子が1歳8か月→またいだ', retestPhaseCrossed({phase:'pre'}, '2025-01-10', '2026-09-25'), true);
   t('v69: 別紙1の子が1歳3か月→まだ', retestPhaseCrossed({phase:'pre'}, '2025-01-10', '2026-04-25'), false);
@@ -5948,8 +6321,9 @@ function runSelfTests(){
   tOk('v69: 要確認＝L-5が付いているのに舌圧は基準内', retestReviewNotes(rvStuck, null).some(x=>/L-5/.test(x)));
   t('v69: 要確認は再検査モード開始(9/9)より前の記録には出さない', retestReviewNotes({...rvStuck, date:'2026-08-20T03:00:00.000Z'}, null), []);
   const rvLost = {type:'adult', date:'2026-09-20T03:00:00.000Z', checkedLItems:['L-5'], measurements:{touched:['maxTonguePressure','biteForce','oralMoisture'], maxTonguePressure:'26.0', biteForce:'400', biteFilter:true, oralMoisture:'28.0'}};
-  tOk('v69: 要確認＝前回のL-1・L-4が再検査の記録から消えた', retestReviewNotes(rvLost, {checkedLItems:['L-1','L-4','L-5']}).some(x=>/L-1・L-4/.test(x)));
-  t('v69: フル評価（舌苔も測った）では「消えた」の印を出さない', retestReviewNotes({...rvLost, measurements:{...rvLost.measurements, touched:[...rvLost.measurements.touched,'tciScore'], tciScore:'30'}}, {checkedLItems:['L-1','L-4','L-5']}), []);
+  const prevFull = {type:'adult', date:'2026-08-01T03:00:00.000Z', checkedLItems:['L-1','L-4','L-5'], measurements:{touched:['tciScore','ddk_pa','ddk_ta','ddk_ka','maxTonguePressure'], tciScore:'61', ddk_pa:'5.5', ddk_ta:'6.2', ddk_ka:'6.1', maxTonguePressure:'25.0'}};
+  tOk('v69: 要確認＝前回のL-1・L-4が再検査の記録から消えた', retestReviewNotes(rvLost, [prevFull]).some(x=>/L-1・L-4/.test(x)));
+  t('v69: フル評価（舌苔も測った）では「消えた」の印を出さない', retestReviewNotes({...rvLost, measurements:{...rvLost.measurements, touched:[...rvLost.measurements.touched,'tciScore'], tciScore:'30'}}, [prevFull]), []);
   // 直し漏れの再発防止：プログラムの中身を機械的に調べる（アプリ部分＝セルフテストより前だけ）
   const SRC = (()=>{ try { return Array.from(document.querySelectorAll('script[type="text/babel"]')).map(x=>x.textContent).join('\n'); } catch(e){ return ''; } })();
   const APP_SRC = SRC.slice(0, Math.max(0, SRC.indexOf('function runSelfTests')));
@@ -5968,6 +6342,18 @@ function runSelfTests(){
   tOk('v69: 直し漏れ検査：lastTestedDate の呼び出しは全部「基準日」まで渡している（'+ltd.length+'か所）', APP_SRC.length>0 && ltd.length>=10 && ltd.every(n=>n===6));
   const atc = APP_SRC.split('\n').filter(l=>l.includes('adultTongueCutoff(') && !/function adultTongueCutoff/.test(l));
   tOk('v69: 直し漏れ検査：年代別の舌圧の目安は画面の参考表示1か所だけで使う（判定・グラフに使わない）', atc.length===1 && /参考表示専用/.test(atc[0]));
+  // 第2弾（v70）
+  t('v70: 再評価の時期 6/15→9月', reEvalLabel('2026-06-15T03:00:00.000Z'), '2026年9月頃（約3か月後）');
+  t('v70: 再評価の時期 8/31→11月（以前は12月にずれた）', reEvalLabel('2026-08-31T03:00:00.000Z'), '2026年11月頃（約3か月後）');
+  t('v70: 再評価の時期 11/30→翌2月（以前は3月にずれた）', reEvalLabel('2026-11-30T03:00:00.000Z'), '2027年2月頃（約3か月後）');
+  t('v70: 数字欄 全角の３５．５→35.5（以前は消えた）', cleanNum('３５．５'), '35.5');
+  t('v70: 数字欄 2つ目の小数点は受け付けない', cleanNum('3.5.'), '3.5');
+  t('v70: 数字欄 数字以外は取り除く', cleanNum('約12本'), '12');
+  const fsU = computeFnScores({measurements:{touched:['oralMoisture'], oralMoisture:'28.0'}, checkedLItems:[]});
+  t('v70: レーダー 測っていない項目は基準線(50)に置く（以前は82＝良好側）', [fsU.find(x=>x.key==='L-1').score, fsU.find(x=>x.key==='L-1').measured], [50, false]);
+  tOk('v70: レーダー 測った項目は今までどおり', fsU.find(x=>x.key==='L-2').measured===true && fsU.find(x=>x.key==='L-2').score>=60);
+  const fsT = computeFnScores({measurements:{touched:['remainingTeeth'], remainingTeeth:'24', biteFilter:true}, checkedLItems:[]});
+  t('v70: レーダー 残存歯数だけ測った「かむ力」は測った扱い', fsT.find(x=>x.key==='L-3').measured, true);
   return R;
 }
 function renderSelfTests(){
@@ -5996,8 +6382,11 @@ else { ReactDOM.createRoot(document.getElementById('root')).render(<App/>); }
 <script>
 if ("serviceWorker" in navigator) {
   // 新バージョンのSWが制御を握ったら一度だけ自動リロード＝「開き直すだけ」で最新版に反映
+  // v70: 入力途中（未保存）のときは読み直しを待ち、アプリ側でトップ画面に戻ったときに読み直す（入力が消えないように）
   var __swReloading=false;
-  navigator.serviceWorker.addEventListener("controllerchange", function(){ if(__swReloading) return; __swReloading=true; location.reload(); });
+  navigator.serviceWorker.addEventListener("controllerchange", function(){ if(__swReloading) return;
+    try { if (typeof window.__oralUnsaved === "function" && window.__oralUnsaved()) { window.__oralPendingReload = true; window.dispatchEvent(new Event("oral-update-waiting")); return; } } catch(e){}
+    __swReloading=true; location.reload(); });
   window.addEventListener("load", function(){ navigator.serviceWorker.register("sw.js").then(function(reg){ try{ reg.update(); }catch(e){} }).catch(function(){}); });
 }
 </script>
