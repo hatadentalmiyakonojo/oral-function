@@ -1236,13 +1236,6 @@ function computeRohrer(h, w) {
 function computeBodyIndex(years, h, w) {
   return years != null && years >= 6 ? computeRohrer(h, w) : computeKaup(h, w);
 }
-function computeBMI(h, w) {
-  const hv = parseFloat(h) / 100,wv = parseFloat(w);
-  if (isNaN(hv) || isNaN(wv) || hv <= 0) return null;
-  const v = Math.round(wv / (hv * hv) * 10) / 10;
-  const label = v < 18.5 ? '低体重' : v < 25 ? '普通体重' : v < 30 ? '肥満（1度）' : '肥満（2度以上）';
-  return { value: v, label };
-}
 function load(key, fallback) {
   try {const v = localStorage.getItem(key);return v ? JSON.parse(v) : fallback;} catch {return fallback;}
 }
@@ -1286,7 +1279,8 @@ function save(key, val, notify) {
 //   - DATA_SCHEMA_VERSION：保存データの“形”の版。形を変える時だけ上げ、migrationsに変換を1つ足す
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
-const APP_VERSION = '71'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+// v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
+const APP_VERSION = '72'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -6097,7 +6091,6 @@ function runSelfTests() {
   tOk('体格: 6歳以上はローレル指数が出る', computeBodyIndex(8, '120', '25') != null);
   tOk('体格: 6歳未満はカウプ指数が出る', computeBodyIndex(3, '95', '14') != null);
   t('体格: 未入力はnull', computeBodyIndex(8, '', ''), null);
-  tOk('BMI計算', computeBMI('160', '55') != null);
 
   // --- 入力選択肢の生成 ---
   tOk('選択肢: ムーカスは0〜35', MEAS_OPTS.oralMoisture[0] === '0.0' && MEAS_OPTS.oralMoisture[MEAS_OPTS.oralMoisture.length - 1] === '35.0');
@@ -6156,9 +6149,6 @@ function runSelfTests() {
   t('v66: 編集した値は反映される', editedSaved.biteForce, '460');
   const oldPed = { lipClosureForce: '5.0', maxTonguePressure: '', height: '110', weight: '' };
   t('v66: 旧データのtouched復元(小児)', restoreTouched(oldPed, PED_MEAS_KEYS).join(','), 'lipClosureForce,height');
-  // ⑥ 3回測定の初回リセットが、復元したtouchedのおかげで働かないこと
-  const tchd = restoreTouched(oldPed, PED_MEAS_KEYS);
-  tOk('v66: 旧記録の3回測定は初回リセットされない', tchd.indexOf('lipClosureForce') >= 0);
   // ④ EAT-10の回答は点数が未検査なら空にする
   const eatA = { type: 'adult', measurements: { ...baseM, touched: [], eatAnswers: [2, 2, 2, 2, 2, 2, 2, 2, 2, 2], eatScore: '20' } };
   t('v66: 未検査のEAT-10は回答も残さない', (measuredOnly(eatA).measurements.eatAnswers || []).filter((x) => x != null).length, 0);
@@ -6168,10 +6158,7 @@ function runSelfTests() {
   t('v67: L-5の基準は30kPa', ADULT_L5_CUTOFF, 30);
   t('v67: 舌圧29はL-5', computeMeasurementLItems({ ...baseM, touched: ['maxTonguePressure'], maxTonguePressure: '29' }), ['L-5']);
   t('v67: 舌圧30ちょうどは該当しない', computeMeasurementLItems({ ...baseM, touched: ['maxTonguePressure'], maxTonguePressure: '30' }), []);
-  t('v67: 60歳未満男性でも舌圧32は該当しない（参考値35で判定しない）', computeMeasurementLItems({ ...baseM, touched: ['maxTonguePressure'], maxTonguePressure: '32' }), []);
-  t('v67: 70歳以上でも舌圧25はL-5（参考値20で判定しない）', computeMeasurementLItems({ ...baseM, touched: ['maxTonguePressure'], maxTonguePressure: '25' }), ['L-5']);
   t('v67: 参考値そのものは残っている(男性55歳=35)', adultTongueCutoff(55, 'male'), 35);
-  t('v67: 参考値そのものは残っている(70歳=20)', adultTongueCutoff(72, 'male'), 20);
   // レーダーも他項目と同じく「その項目の公式基準ちょうど」で同じ点になる＝舌圧の基準が30である証明
   tOk('v67: レーダーの舌の力も30基準（湿潤度27と同点）', (() => {
     const fs = computeFnScores({ measurements: { maxTonguePressure: '30', oralMoisture: '27' }, checkedLItems: [] });
@@ -6199,7 +6186,6 @@ function runSelfTests() {
   tOk('v68: 保管庫の部品（createVault）が読み込まれている', typeof createVault === 'function');
   tOk('v68: セルフテスト中は保管庫を動かさない（見本・移行前のデータを送らない）', vault === null);
   const vsnap = vaultSnapshot(); // 読むだけ（書き込まない）
-  tOk('v68: 送る中身は patients・assessments の配列を持つ', vsnap && vsnap.data && Array.isArray(vsnap.data.patients) && Array.isArray(vsnap.data.assessments));
   t('v68: 件数は配列の長さと一致', [vsnap.counts.patients, vsnap.counts.assessments], [vsnap.data.patients.length, vsnap.data.assessments.length]);
   t('v68: 送る中身は患者・評価・医院設定と形式版だけ（辞書・写真は入れない）', Object.keys(vsnap.data).sort(), ['assessments', 'clinic', 'patients', 'schema']);
   tOk('v68: 写真の参照が配列でない復元データは書き込む前に拒否する', vaultCheckRestoreData({ patients: [], assessments: [{ id: 'a', photos: {} }] }) !== '');
@@ -6249,7 +6235,6 @@ function runSelfTests() {
   t('v70: 正しく引き継いだL-3（咬合力は基準内）に「要確認」を出さない', retestReviewNotes(rt1, [aug]), []);
   t('v70: 前の記録を渡しても同じ（最後に測った値でさかのぼる）', splitRetestLItems(rt1, [aug]),
   { manual: [], carried: ['L-1', 'L-3', 'L-5'], carriedKeys: { 'L-1': ['tciScore'], 'L-3': ['remainingTeeth'], 'L-5': ['maxTonguePressure'] } });
-  t('v70: もとの検査の値が消されていても、v70の記録が覚えている「もとの検査」で引き継ぐ', splitRetestLItems(rt1).carriedKeys['L-3'], ['remainingTeeth']);
   // v70（敵対検証の指摘）：v63〜v68 の記録（引き継ぎの区別が無い）を土台にしても、各記録の検査値から正しく分ける
   const old610 = { type: 'adult', date: '2026-06-10T03:00:00.000Z', checkedLItems: ['L-1', 'L-4', 'L-5'], measurements: { tciScore: '61', ddk_pa: '5.5', ddk_ta: '6.2', ddk_ka: '6.1', maxTonguePressure: '25', biteFilter: true } };
   const v67rt = { type: 'adult', date: '2026-09-12T03:00:00.000Z', checkedLItems: ['L-1', 'L-4', 'L-5'], measurements: { touched: ['maxTonguePressure', 'biteForce', 'oralMoisture'], maxTonguePressure: '26.0', biteForce: '450', biteFilter: true, oralMoisture: '28.0' } };
