@@ -1280,7 +1280,7 @@ function save(key, val, notify) {
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
 // v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
-const APP_VERSION = '72'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '73'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1779,6 +1779,20 @@ function hasUnbackedChanges() {
   if (load('patients', []).some(changed) || load('assessments', []).some(changed)) return true;
   if ((load('pendingTombstones', []) || []).length) return true;
   return false;
+}
+// Mac mini（院内保管庫）に今のデータが届いているか。保管庫を設定していない・一度も届いていない端末は null（書き出しの案内のまま）
+//   ok＝届いた後に変わった患者・評価が無い、または最後に届いてから1日たっていない（まもなく送る）
+const VAULT_STALE_MS = 86400000;
+function vaultCover() {
+  try {
+    if (!vault) return null;
+    const s = vault.status();
+    if (s.state === 'off' || !s.lastOkAt) return null;
+    const changed = (x) => x.updatedAt && new Date(x.updatedAt).getTime() > s.lastOkAt;
+    const since = load('patients', []).filter(changed).length + load('assessments', []).filter(changed).length;
+    const age = Date.now() - s.lastOkAt;
+    return { ok: since === 0 || age < VAULT_STALE_MS, days: Math.floor(age / 86400000), since };
+  } catch (_) {return null;}
 }
 // 差分ファイルを構築（前回バックアップ以降の変更分＋未書き出し写真＋削除tombstone）。schema:3・mode:'diff'
 async function buildDiffBackup(password) {
@@ -2941,6 +2955,9 @@ function clearDraftIfMine(token) {const d = readDraft();if (d && d.token === tok
 function Home() {
   const vaultBadgeRef = useRef(null); // v68: 院内保管庫の状態（🖥 保管 今日 10:32 など）。未設定なら何も出ない
   useEffect(() => {try {if (vault && vaultBadgeRef.current) vault.mountBadge(vaultBadgeRef.current);} catch (_) {}}, []);
+  // Mac mini に届いた・届かなくなったら案内を出し直す
+  useEffect(() => {try {if (!vault || !vaultBadgeRef.current) return;let prev = !!(vaultCover() || {}).ok;
+      vault.onStatus(() => {const ok = !!(vaultCover() || {}).ok;if (ok !== prev) {prev = ok;bump();}}, vaultBadgeRef.current);} catch (_) {}}, []);
   const nav = useNav();
   const { assessments, patients } = useS();
   const showToast = useToast();
@@ -2956,13 +2973,16 @@ function Home() {
   const autoPw = load('autoBackupPw', '');
   const days = bk ? Math.floor((Date.now() - new Date(bk).getTime()) / 86400000) : Infinity;
   const dueChanges = hasUnbackedChanges();
-  const level = !dueChanges ? null : days >= 30 ? 'red' : days >= 14 ? 'amber' : bk === null || days >= 1 ? 'info' : null;
+  // Mac mini に届いている端末は案内を出さない（院長 2026-10-28）。届かない日が続けば Mac mini を確かめる案内
+  const vc = vaultCover();
+  const level = vc ? vc.ok ? null : vc.days >= 7 ? 'red' : 'amber' :
+  !dueChanges ? null : days >= 30 ? 'red' : days >= 14 ? 'amber' : bk === null || days >= 1 ? 'info' : null;
   const palette = { red: 'bg-red-50 border-red-200 text-red-800', amber: 'bg-amber-50 border-amber-200 text-amber-800', info: 'bg-blue-50 border-blue-200 text-blue-800' };
   const btnPalette = { red: 'bg-red-600 hover:bg-red-700', amber: 'bg-amber-600 hover:bg-amber-700', info: 'bg-blue-600 hover:bg-blue-700' };
   // アプリ更新の検知：前回見た版と違い、かつ実データがあれば「更新直後の案内」を最優先で表示（更新後のバックアップ漏れ防止）
   const seenVer = load('lastSeenAppVersion', null);
   const hasData = load('patients', []).length > 0 || load('assessments', []).length > 0;
-  const showUpdate = seenVer !== APP_VERSION && hasData;
+  const showUpdate = seenVer !== APP_VERSION && hasData && !(vc && vc.ok);
   const dailyLevel = showUpdate ? null : level; // 更新案内中は通常の日次案内を出さない（二重表示防止）
   const stampSeen = () => {save('lastSeenAppVersion', APP_VERSION);bump();}; // 「後で」で今回版を既読化
   const oneTapBackup = async () => {
@@ -3005,9 +3025,10 @@ function Home() {
     dailyLevel && /*#__PURE__*/
     React.createElement("div", { className: `px-6 py-3 flex items-center gap-3 border-b ${palette[dailyLevel]}` }, /*#__PURE__*/
     React.createElement("span", { className: "text-sm flex-1" },
-    dailyLevel === 'info' ? '💾 ' : '⚠ ', bk ?
+    vc ? /*#__PURE__*/React.createElement(React.Fragment, null, "\uD83D\uDDA5 Mac mini \u306B", /*#__PURE__*/React.createElement("b", null, vc.days, "\u65E5"), "\u30C7\u30FC\u30BF\u304C\u5C4A\u3044\u3066\u3044\u307E\u305B\u3093\uFF08\u305D\u306E\u5F8C\u306E\u5909\u66F4 ", vc.since, "\u4EF6\uFF09\u3002\u9662\u5185Wi-Fi \u3068 Mac mini \u306E\u96FB\u6E90\u3092\u78BA\u304B\u3081\u3066\u304F\u3060\u3055\u3044\u3002\u76F4\u3089\u306A\u3044\u3068\u304D\u306F\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u66F8\u304D\u51FA\u3057\u3066\u304F\u3060\u3055\u3044\u3002") : /*#__PURE__*/
+    React.createElement(React.Fragment, null, dailyLevel === 'info' ? '💾 ' : '⚠ ', bk ?
     `最終バックアップから${days >= 1 ? days + '日' : 'まもなく1日'}。今日のバックアップをおすすめします。` :
-    'まだバックアップがありません。データ消失に備えて書き出してください。'
+    'まだバックアップがありません。データ消失に備えて書き出してください。')
     ), /*#__PURE__*/
     React.createElement("button", { onClick: oneTapBackup, disabled: bkBusy,
       className: `flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white disabled:opacity-50 ${btnPalette[dailyLevel]}` },
