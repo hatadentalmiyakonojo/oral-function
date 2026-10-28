@@ -1280,7 +1280,7 @@ function save(key, val, notify) {
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
 // v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
-const APP_VERSION = '73'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '74'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -2097,8 +2097,8 @@ const L_ITEMS = [
 { id: 'L-4', cat: '個別機能', label: '舌口唇運動機能低下', measurement: 'オーラルディアドコキネシス', criterion: 'パ・タ・カいずれかが6回/秒未満', threshold: 'パ・タ・カ いずれか <6回/秒' },
 { id: 'L-5', cat: '個別機能', label: '低舌圧', measurement: '舌圧検査（JMS舌圧計）', criterion: '最大舌圧 30kPa未満', threshold: '最大舌圧 <30kPa' },
 { id: 'L-6', cat: '総合機能', label: '咀嚼機能低下', measurement: 'グミ咀嚼テスト / グルコース溶出量', criterion: 'グルコース濃度 100mg/dL未満', threshold: 'グルコース <100mg/dL' },
-{ id: 'L-7', cat: '総合機能', label: '嚥下機能低下', measurement: 'EAT-10 / RSST（反復唾液嚥下テスト）', criterion: 'EAT-10 ≥3点、またはRSST 3回未満/30秒', threshold: 'EAT-10 ≥3 / RSST <3回/30秒' }];
-
+{ id: 'L-7', cat: '総合機能', label: '嚥下機能低下', measurement: 'EAT-10（RSSTは参考の記録）', criterion: 'EAT-10 3点以上', threshold: 'EAT-10 ≥3' } // v74: RSST は判定に使わない（日本歯科医学会の基準＝EAT-10 または聖隷式嚥下質問紙。RSST はスクリーニング）
+];
 const L_CATS = ['口腔内環境', '個別機能', '総合機能'];
 // 印刷（患者配布用）のやさしい言い換え。高齢の方にも伝わる表現
 const L_PLAIN = {
@@ -2125,7 +2125,7 @@ function computeFnScores(a) {// v67: 舌圧も他項目と同じく公式基準(
   const lo = (v, t) => {const x = parseFloat(v);return isNaN(x) ? null : cl(100 - x / t * 50);};
   const hi = (v, t) => {const x = parseFloat(v);return isNaN(x) ? null : cl(x / t * 50);};
   const ddk = (() => {const arr = [m.ddk_pa, m.ddk_ta, m.ddk_ka].map(parseFloat).filter((x) => !isNaN(x));return arr.length ? cl(Math.min(...arr) / 6 * 50) : null;})();
-  const l7 = (() => {const e = lo(m.eatScore, 3),r = hi(m.rsst, 3);const vs = [e, r].filter((x) => x != null);return vs.length ? Math.min(...vs) : null;})();
+  const l7 = lo(m.eatScore, 3); // v74: RSST は判定に使わないので、レーダーも EAT-10 だけで描く
   // v70: 1つのL項目に検査が2つあるもの（清潔＝舌苔/細菌数・うるおい＝ムーカス/サクソン・かむ力＝咬合力/残存歯数）は、
   //      測ったほうで描く（両方あれば弱いほう）。以前は片方だけ見ていて、残存歯数だけ測った「かむ力」が未検査扱いになっていた
   const pick = (...vs) => {const a = vs.filter((x) => x != null);return a.length ? Math.min(...a) : null;};
@@ -2527,7 +2527,7 @@ function computeMeasurementLItems(m) {
   if (nv('ddk_pa') < 6 || nv('ddk_ta') < 6 || nv('ddk_ka') < 6) c.push('L-4');
   if (nv('maxTonguePressure') < tCut) c.push('L-5');
   if (nv('masticationScore') < 100) c.push('L-6');
-  if (nv('eatScore') >= 3 || nv('rsst') < 3) c.push('L-7');
+  if (nv('eatScore') >= 3) c.push('L-7'); // v74: RSST（30秒で3回未満）は学会の判定基準ではないので数えない（値は参考として残す）
   return [...new Set(c)];
 }
 
@@ -4526,7 +4526,7 @@ const EMPTY_M = { touched: [], tciScore: '50', tciZones: [1, 1, 1, 1, 1, 1, 1, 1
 // v69: 再検査（舌圧・咬合圧・湿潤度の3検査だけ測る）で「今回測り直すL項目」と、各L項目の判定に使う検査
 const RETEST_L_ITEMS = ['L-2', 'L-3', 'L-5'];
 const L_TEST_KEYS = { 'L-1': ['tciScore', 'bacteriaLevel'], 'L-2': ['oralMoisture', 'saxonTest'], 'L-3': ['biteForce', 'remainingTeeth'],
-  'L-4': ['ddk_pa', 'ddk_ta', 'ddk_ka'], 'L-5': ['maxTonguePressure'], 'L-6': ['masticationScore'], 'L-7': ['eatScore', 'rsst'] };
+  'L-4': ['ddk_pa', 'ddk_ta', 'ddk_ka'], 'L-5': ['maxTonguePressure'], 'L-6': ['masticationScore'], 'L-7': ['eatScore'] }; // v74: L-7 は EAT-10 だけ
 // v69: 再検査の土台（前回の記録）のL項目を「手で付けた判定(manual)」と「今回測らない項目の検査由来の判定(carried)」に分ける。
 //   ・今回測り直す3項目（L-2/L-3/L-5）の検査由来の判定は引き継がない（今回の測定で出し直す）
 //   ・今回測らない項目（L-1/L-4/L-6/L-7）の検査由来の判定は carried として引き継ぐ（v63〜v68は捨てていたため、
@@ -5102,7 +5102,7 @@ function AdultFlow({ patientId: initPid, assessmentId, mode, draft }) {
           item.id === 'L-7' && /*#__PURE__*/React.createElement("div", { className: "ml-7 space-y-3" }, /*#__PURE__*/
           React.createElement("p", { className: "text-xs font-medium text-gray-600" }, "EAT-10\uFF08\u56A5\u4E0B\u30B9\u30AF\u30EA\u30FC\u30CB\u30F3\u30B0\u8CEA\u554F\u7968\uFF09"), /*#__PURE__*/
           React.createElement(EAT10, { answers: m.eatAnswers, onChange: setEat, disabled: ro }), /*#__PURE__*/
-          React.createElement("div", { className: "w-44" }, /*#__PURE__*/React.createElement(MeasInput, { label: "RSST\uFF08\u53CD\u5FA9\u553E\u6DB2\u56A5\u4E0B\uFF09", unit: "\u56DE/30\u79D2", mkey: "rsst", thr: 3, m: m, setM: setMv, disabled: ro, free: true, suggest: sg('rsst') }))
+          React.createElement("div", { className: "w-44" }, /*#__PURE__*/React.createElement(MeasInput, { label: "RSST\uFF08\u53C2\u8003\u30FB\u5224\u5B9A\u306B\u306F\u4F7F\u308F\u306A\u3044\uFF09", unit: "\u56DE/30\u79D2", mkey: "rsst", m: m, setM: setMv, disabled: ro, free: true, suggest: sg('rsst') }))
           )
           )
           );
@@ -6055,6 +6055,9 @@ function runSelfTests() {
   t('L判定: DDK5.5はL-4', computeMeasurementLItems({ ...baseM, touched: ['ddk_pa'], ddk_pa: '5.5' }), ['L-4']);
   t('L判定: 舌圧25(cut-off30)はL-5', computeMeasurementLItems({ ...baseM, touched: ['maxTonguePressure'], maxTonguePressure: '25' }), ['L-5']);
   t('L判定: EAT-10が3点でL-7', computeMeasurementLItems({ ...baseM, touched: ['eatScore'], eatScore: '3' }), ['L-7']);
+  t('v74: RSST 2回だけではL-7にしない（学会の基準はEAT-10）', computeMeasurementLItems({ ...baseM, touched: ['rsst'], rsst: '2' }), []);
+  t('v74: 旧データ(touched無し)でもRSST 2回だけではL-7にしない', computeMeasurementLItems({ rsst: '2', biteFilter: true }), []);
+  t('v74: EAT-10 2点＋RSST 2回は該当しない', computeMeasurementLItems({ ...baseM, touched: ['eatScore', 'rsst'], eatScore: '2', rsst: '2' }), []);
   t('L判定: 旧データ(touched無し)は従来どおりTCI50でL-1', computeMeasurementLItems({ tciScore: '50', biteFilter: true }), ['L-1']);
 
   // --- 年齢・基準値 ---
