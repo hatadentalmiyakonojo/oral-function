@@ -999,6 +999,156 @@ body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
 })(typeof window !== 'undefined' ? window : this);
 /* VAULT-CLIENT:END */
 </script>
+<script>
+/* ROSTER-CLIENT:BEGIN v1 ─ 患者名簿の窓口につなぐ部品（正本: Ai/患者名簿/client/roster-client.js・直接直さない） */
+/* 患者名簿の窓口（Mac mini :8446）につなぐ部品。歯周検査・口腔機能管理で共通。
+   正本は 患者名簿/client/roster-client.js。アプリには 患者名簿/client/inline_roster_client.py で埋め込む
+   （アプリの中の ROSTER-CLIENT:BEGIN〜END は手で直さない）。
+
+   - 鍵は院長が出した8けたの番号と引き換えに1回だけ受け取り、「取り出せない鍵」（WebCrypto の HMAC・extractable=false）
+     にして IndexedDB（hata-roster）にしまう。しまえないブラウザでは、鍵の文字をしまう（kind='raw'）
+   - 毎回の問い合わせに判子（HMAC-SHA256：方式・道・時刻・使い捨ての値・中身の指紋）を付ける。鍵そのものは送らない
+   - 番号や名前は住所（URL）に入れず中身で送る。返事は保存しない（呼び出し側も、タップして登録した人のほかは覚えない）
+   - 3秒で返事が無ければあきらめる（手で入れられるまま待たせない）
+   - 鍵はアプリごとに別の置き場所（'device:perio'・'device:oral'）。2つのアプリは同じ住所（github.io）なので、
+     置き場所を分けないと片方のつなぎ直しでもう片方の鍵が入れ替わる。アプリは最初に HataRoster.app を決める
+   - 「鍵を消す」は、窓口にもその鍵を使えなくするよう伝えてから消す
+   - 同じ住所の別のアプリに悪いプログラムが入ると、この鍵で判子を押せてしまう（取り出せないが、その場では使える）。
+     窓口の回数の上限（1台・24時間で100人）が被害の上限
+*/
+(function () {
+  'use strict';
+  var DB = 'hata-roster', STORE = 'keys';
+  var R = { url: 'https://mini.hatadental.net:8446', timeoutMs: 3000, offset: 0, app: '' };
+  function slot() {
+    if (R.app !== 'perio' && R.app !== 'oral') throw Object.assign(new Error('アプリが決まっていません（HataRoster.app）'), { kind: 'input' });
+    return 'device:' + R.app;
+  }
+  var enc = new TextEncoder();
+
+  function idb() {
+    return new Promise(function (ok, ng) {
+      var q = indexedDB.open(DB, 1);
+      q.onupgradeneeded = function () { q.result.createObjectStore(STORE); };
+      q.onsuccess = function () { ok(q.result); };
+      q.onerror = function () { ng(q.error); };
+    });
+  }
+  function tx(mode, fn) {
+    return idb().then(function (db) {
+      return new Promise(function (ok, ng) {
+        var t = db.transaction(STORE, mode), st = t.objectStore(STORE), out;
+        try { out = fn(st); } catch (e) { db.close(); ng(e); return; }
+        t.oncomplete = function () { db.close(); ok(out && 'result' in out ? out.result : undefined); };
+        t.onerror = t.onabort = function () { db.close(); ng(t.error || new Error('IndexedDB')); };
+      });
+    });
+  }
+  var cache = {};     // しまってある記録（アプリごと {device,name,app,kind,key|raw}）
+  function load() {
+    var s;
+    try { s = slot(); } catch (e) { return Promise.reject(e); }
+    if (cache[s] !== undefined) return Promise.resolve(cache[s]);
+    return tx('readonly', function (st) { return st.get(s); }).then(function (v) { cache[s] = v || null; return cache[s]; },
+      function () { cache[s] = null; return null; });
+  }
+  function b64ToBytes(s) { var b = atob(s), a = new Uint8Array(b.length); for (var i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }
+  function bytesToB64u(buf) {
+    var a = new Uint8Array(buf), s = '';
+    for (var i = 0; i < a.length; i++) s += String.fromCharCode(a[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function hex(buf) { var a = new Uint8Array(buf), s = ''; for (var i = 0; i < a.length; i++) s += (a[i] < 16 ? '0' : '') + a[i].toString(16); return s; }
+  function hmacKey(raw, extractable) {
+    return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, extractable, ['sign']);
+  }
+
+  function post(path, bodyText, headers) {
+    var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, R.timeoutMs);
+    var h = { 'Content-Type': 'application/json' };
+    for (var k in headers || {}) h[k] = headers[k];
+    return fetch(R.url + path, { method: 'POST', body: bodyText, headers: h, cache: 'no-store', credentials: 'omit',
+      mode: 'cors', signal: ctl ? ctl.signal : undefined, referrerPolicy: 'no-referrer' })
+      .then(function (r) {
+        // 中身を読み終えるまでが3秒（返事の頭だけ来て止まったときも待たせない）
+        return r.json().catch(function () { return {}; }).then(function (j) { clearTimeout(timer); j._status = r.status; return j; });
+      }).then(null, function (e) {
+        clearTimeout(timer);
+        var err = new Error('名簿（Mac mini）につながりません'); err.kind = 'net'; throw err;
+      });
+  }
+
+  // 院長が出した8けたの番号で鍵を受け取る
+  R.pair = function (code, app) {
+    if (app) R.app = app;
+    var s;
+    try { s = slot(); } catch (e) { return Promise.reject(e); }
+    app = R.app;
+    code = String(code || '').replace(/[^0-9０-９]/g, '').replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); });
+    if (code.length !== 8) return Promise.reject(Object.assign(new Error('8けたの番号を入れてください'), { kind: 'input' }));
+    return post('/v1/pair', JSON.stringify({ code: code, app: app })).then(function (j) {
+      if (j._status !== 200 || !j.secret) throw Object.assign(new Error(j.error || '鍵を受け取れませんでした'), { kind: 'pair' });
+      var raw = b64ToBytes(j.secret);
+      return hmacKey(raw, false).then(function (key) {
+        var rec = { device: j.device, name: j.name, app: app, kind: 'key', key: key, at: Date.now() };
+        return tx('readwrite', function (st) { st.put(rec, s); }).then(function () { return rec; }, function () {
+          // 取り出せない鍵をしまえないブラウザ → 鍵の文字をしまう（院内だけ・回数の上限で守る）
+          var rec2 = { device: j.device, name: j.name, app: app, kind: 'raw', raw: j.secret, at: Date.now() };
+          return tx('readwrite', function (st) { st.put(rec2, s); }).then(function () { return rec2; });
+        });
+      }).then(function (rec) { raw.fill(0); cache[s] = rec; return { name: rec.name, kind: rec.kind }; });
+    });
+  };
+  // 鍵を消す：窓口にも伝える（つながらなくても、この iPad からは消す。窓口では院長の画面で「止める」）
+  R.forget = function () {
+    var s;
+    try { s = slot(); } catch (e) { return Promise.reject(e); }
+    var told = signed('/v1/forget', {}).then(function () { return true; }, function () { return false; });
+    return told.then(function (ok) {
+      cache[s] = null;
+      return tx('readwrite', function (st) { st.delete(s); }).then(function () { return { told: ok }; });
+    });
+  };
+  R.info = function () { return load().then(function (r) { return r ? { name: r.name, app: r.app, kind: r.kind, device: r.device } : null; }); };
+
+  function signed(path, obj, retried) {
+    return load().then(function (rec) {
+      if (!rec) throw Object.assign(new Error('名簿につないでいません'), { kind: 'unpaired' });
+      var body = JSON.stringify(obj || {});
+      var ts = String(Date.now() + R.offset);
+      var n = new Uint8Array(16); crypto.getRandomValues(n);
+      var nonce = bytesToB64u(n);
+      var keyP = rec.kind === 'key' ? Promise.resolve(rec.key) : hmacKey(b64ToBytes(rec.raw), false);
+      return Promise.all([keyP, crypto.subtle.digest('SHA-256', enc.encode(body))]).then(function (a) {
+        var base = ['v1', 'POST', path, ts, nonce, hex(a[1])].join('\n');
+        return crypto.subtle.sign('HMAC', a[0], enc.encode(base));
+      }).then(function (sig) {
+        return post(path, body, { 'X-Roster-Device': rec.device, 'X-Roster-Time': ts, 'X-Roster-Nonce': nonce,
+          'X-Roster-Sig': bytesToB64u(sig) });
+      }).then(function (j) {
+        if (j._status === 401 && j.code === 'time' && j.server_time && !retried) {   // iPad の時計のずれを合わせて1回だけやり直す
+          R.offset = j.server_time - Date.now();
+          return signed(path, obj, true);
+        }
+        if (j._status !== 200) {
+          var e = new Error(j.error || '名簿の窓口でエラー（' + j._status + '）');
+          e.kind = j._status === 401 ? (j.code === 'unknown' ? 'unpaired' : 'auth') : j._status === 403 ? (j.code || 'denied') : 'server';
+          throw e;
+        }
+        return j;
+      });
+    });
+  }
+  // 戻り値 {no（聞いた番号そのまま）, found, item:{no,sei,mei,seiKana,meiKana,birth,sex}|null, asof, stale}
+  R.lookup = function (no) { return signed('/v1/lookup', { no: String(no) }); };
+  R.search = function (q) { return signed('/v1/search', { q: String(q) }); };
+  R.refresh = function () { return signed('/v1/refresh', {}); };
+  R.status = function () { return signed('/v1/status', {}); };
+  window.HataRoster = R;
+})();
+/* ROSTER-CLIENT:END */
+</script>
 </head>
 <body class="bg-gray-50">
 <div id="root"></div>
@@ -1280,7 +1430,7 @@ function save(key, val, notify) {
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
 // v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
-const APP_VERSION = '74'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '75'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1711,6 +1861,13 @@ function saveChartDict(dict) {
   }
 }
 function clearChartDict() {try {localStorage.removeItem(CHART_DICT_KEY);} catch (e) {}_chartDictCache = null;}
+// 患者名簿（Mac mini）＝院内の Mac mini に1人ずつ聞く（v75。設計: 書類・資料/企画・レポート/患者名簿の自動取り込み_設計.html）
+// iPad には名簿を置かない。並走の間は、Mac mini につながらないときだけ、上の予測変換辞書（この端末の中）があればそれを使う。
+// 聞いた答えは画面に出すだけで覚えない（タップして保存した患者は今までどおり）。窓口につなぐ部品は ROSTER-CLIENT（window.HataRoster）
+if (window.HataRoster) window.HataRoster.app = 'oral'; // 鍵の置き場所はアプリごと（歯周検査と同じ住所なので分ける）
+function nrToDictItem(x) {return [String(x && x.no || ''), x && x.sei || '', x && x.mei || '', x && x.birth || '', x && x.seiKana || '', x && x.meiKana || '', x && x.sex || ''];}
+function nrErrText(e) {return e && e.kind === 'net' ? '名簿（Mac mini）につながりません（院内の Wi-Fi か確かめてください）' : e && e.message || '名簿（Mac mini）でエラー';}
+function fmtNrAsof(s) {const d = new Date(s);return isNaN(d) ? '' : d.getMonth() + 1 + '/' + d.getDate() + ' ' + d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0') + ' 時点';}
 
 // ═══════════════════════════════════════════════
 // バックアップ（パスワード暗号化）── CryptoJS(PBKDF2+AES)。localhost以外/iPadのLAN(http)でも動作
@@ -3064,6 +3221,47 @@ function Home() {
 // ═══════════════════════════════════════════════
 // PAGE: SETTINGS
 // ═══════════════════════════════════════════════
+function RosterNetCard() {
+  const [info, setInfo] = useState(undefined);
+  const [code, setCode] = useState('');
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {if (window.HataRoster) window.HataRoster.info().then(setInfo, () => setInfo(null));else setInfo(null);}, []);
+  if (!window.HataRoster) return null;
+  const R = window.HataRoster;
+  const pair = () => {setBusy(true);setMsg(null);
+    R.pair(code, 'oral').then(() => R.info()).then((i) => {setInfo(i);setCode('');setMsg({ type: 'ok', text: '名簿（Mac mini）につなぎました：' + (i && i.name || '') });}, (e) => setMsg({ type: 'err', text: nrErrText(e) })).then(() => setBusy(false));};
+  const status = () => {R.status().then((j) => setMsg({ type: 'ok', text: (j.asof ? fmtNrAsof(j.asof) + '・' : 'まだ名簿がありません・') + (j.count || 0) + '人' + (j.stale ? '・古くなっています' : '') + (j.refreshing ? '・取り直し中' : '') + (j.last_error ? '・前回の取得: ' + j.last_error : '') }), (e) => setMsg({ type: 'err', text: nrErrText(e) }));};
+  const refresh = () => {R.refresh().then((j) => setMsg({ type: 'ok', text: j.started ? '名簿の取り直しを始めました（数分かかります）' : j.running ? '名簿を取り直している最中です' : '少し前に取り直したばかりです（' + Math.ceil((j.wait || 60) / 60) + '分後から）' }), (e) => setMsg({ type: 'err', text: nrErrText(e) }));};
+  const forget = () => {if (!window.confirm('この iPad の名簿の鍵を消します（もう一度つなぐには、院長に番号を出してもらいます）。よろしいですか？')) return;
+    R.forget().then((r) => {setInfo(null);setMsg(r && r.told === false ? { type: 'err', text: '名簿の鍵を消しました（Mac mini に伝えられなかったので、院長の画面で「止める」を押してください）' } : { type: 'ok', text: '名簿の鍵を消しました' });});};
+  const btn = "px-3 py-2 rounded-xl text-sm font-medium bg-gray-100 hover:bg-gray-200 text-gray-700";
+  return (/*#__PURE__*/
+    React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6 space-y-4", "data-testid": "roster-net-card" }, /*#__PURE__*/
+    React.createElement("div", null, /*#__PURE__*/
+    React.createElement("h2", { className: "font-semibold text-gray-800" }, "\uD83D\uDCD6 \u60A3\u8005\u540D\u7C3F\uFF08Mac mini\uFF09"), /*#__PURE__*/
+    React.createElement("p", { className: "text-xs text-gray-500 mt-1" }, "\u9662\u9577\u304C\u300C\u540D\u7C3F\u306E\u9375\u300D\u306E\u753B\u9762\uFF08\u9662\u5185\u306E Mac mini\u30FBhttps://mini.hatadental.net:8446/admin\uFF09\u3067\u51FA\u3057\u305F8\u3051\u305F\u306E\u756A\u53F7\u3092\u5165\u308C\u308B\u3068\u3001\u65B0\u898F\u767B\u9332\u3067\u30AB\u30EB\u30C6\u756A\u53F7\u3092\u5165\u308C\u305F\u3068\u304D\u306B Mac mini \u306E\u540D\u7C3F\u304B\u3089\u305D\u306E1\u4EBA\u5206\u3060\u3051\u3092\u5F15\u304D\u307E\u3059\uFF08\u9662\u5185\u306E Wi-Fi \u3060\u3051\uFF09\u3002iPad \u306B\u540D\u7C3F\u306F\u7F6E\u304D\u307E\u305B\u3093\u3002\u30DB\u30FC\u30E0\u753B\u9762\u306E\u30A2\u30A4\u30B3\u30F3\u304B\u3089\u958B\u3044\u305F\u30A2\u30D7\u30EA\u3067\u5165\u308C\u3066\u304F\u3060\u3055\u3044\u3002")
+    ),
+    info === undefined ? /*#__PURE__*/React.createElement("p", { className: "text-sm text-gray-400" }, "\u78BA\u8A8D\u4E2D\u2026") : info ? /*#__PURE__*/
+    React.createElement("div", { className: "space-y-3" }, /*#__PURE__*/
+    React.createElement("p", { className: "text-sm text-gray-700" }, "\u3064\u306A\u3044\u3067\u3044\u307E\u3059\uFF1A", /*#__PURE__*/React.createElement("span", { className: "font-semibold" }, info.name), info.kind === 'raw' ? '（鍵はふつうの形でしまっています）' : ''), /*#__PURE__*/
+    React.createElement("div", { className: "flex flex-wrap gap-2" }, /*#__PURE__*/
+    React.createElement(TapButton, { onClick: status, className: btn }, "\u540D\u7C3F\u306E\u72B6\u614B\u3092\u898B\u308B"), /*#__PURE__*/
+    React.createElement(TapButton, { onClick: refresh, className: btn }, "\u540D\u7C3F\u3092\u53D6\u308A\u76F4\u3059"), /*#__PURE__*/
+    React.createElement(TapButton, { onClick: forget, className: "px-3 py-2 rounded-xl text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100" }, "\u3053\u306E iPad \u306E\u9375\u3092\u6D88\u3059")
+    )
+    ) : /*#__PURE__*/
+
+    React.createElement("div", { className: "flex gap-2 items-center" }, /*#__PURE__*/
+    React.createElement("input", { value: code, onChange: (e) => setCode(e.target.value), inputMode: "numeric", autoComplete: "one-time-code", placeholder: "8\u3051\u305F\u306E\u756A\u53F7", "data-testid": "roster-code", className: "flex-1 border border-gray-200 rounded-xl px-4 py-3 text-sm" }), /*#__PURE__*/
+    React.createElement(TapButton, { onClick: pair, disabled: busy, className: "px-4 py-3 rounded-xl font-semibold text-white bg-indigo-600 disabled:opacity-50" }, "\u3064\u306A\u3050")
+    ),
+
+    msg && /*#__PURE__*/React.createElement("p", { className: `text-sm ${msg.type === 'ok' ? 'text-green-600' : 'text-red-600'}`, "data-testid": "roster-msg" }, msg.text)
+    ));
+
+}
+
 function Settings() {
   const nav = useNav();
   const { clinic, setClinic, patients, assessments } = useS();
@@ -3379,9 +3577,12 @@ function Settings() {
     vault && /*#__PURE__*/React.createElement("div", { ref: vaultRef }), /*#__PURE__*/
 
 
+    React.createElement(RosterNetCard, null), /*#__PURE__*/
+
+
     React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6 space-y-4" }, /*#__PURE__*/
     React.createElement("div", null, /*#__PURE__*/
-    React.createElement("h2", { className: "font-semibold text-gray-800" }, "\uD83D\uDCD6 \u4E88\u6E2C\u5909\u63DB\u8F9E\u66F8\uFF08\u30EC\u30BB\u30B3\u30F3CSV\uFF09"), /*#__PURE__*/
+    React.createElement("h2", { className: "font-semibold text-gray-800" }, "\uD83D\uDCD6 \u4E88\u6E2C\u5909\u63DB\u8F9E\u66F8\uFF08\u30EC\u30BB\u30B3\u30F3CSV\u30FB\u3053\u306E\u7AEF\u672B\u306E\u4E2D\uFF09"), /*#__PURE__*/
     React.createElement("p", { className: "text-xs text-gray-500 mt-1" }, "\u30EC\u30BB\u30B3\u30F3\u306E\u4E88\u7D04CSV\uFF08\u5168\u60A3\u8005\u5206\uFF09\u3092\u53D6\u308A\u8FBC\u3080\u3068\u3001\u65B0\u898F\u60A3\u8005\u306E\u767B\u9332\u6642\u306B\u30AB\u30EB\u30C6\u756A\u53F7\u3092\u5165\u308C\u308B\u3060\u3051\u3067\u6C0F\u540D\u30FB\u751F\u5E74\u6708\u65E5\u306E\u5019\u88DC\u304C\u51FA\u3066\u81EA\u52D5\u5165\u529B\u3067\u304D\u307E\u3059\u3002\u60A3\u8005\u4E00\u89A7\u306B\u306F\u8868\u793A\u3055\u308C\u307E\u305B\u3093\u3002")
     ),
     dictInfo ? /*#__PURE__*/
@@ -3567,11 +3768,33 @@ function PatientForm({ patientId, returnTo }) {
     }
     return [...exact, ...pre].slice(0, 8);
   }, [dict, form.chartNo, dictPicked]);
+  // ── 患者名簿（Mac mini）：カルテ番号を打ち終えて少し止まったら、その1人分だけを聞く（新規登録のときだけ） ──
+  const [nr, setNr] = useState({ paired: null, key: '', cand: undefined, err: '', errKind: '', asof: '', stale: false });
+  const chartRef = useRef(form.chartNo);chartRef.current = form.chartNo;
+  useEffect(() => {if (existing || !window.HataRoster) return;window.HataRoster.info().then((i) => setNr((s) => ({ ...s, paired: i }))).catch(() => {});}, []);
+  useEffect(() => {
+    if (existing || !nr.paired || dictPicked) return;
+    const raw = form.chartNo,k = normChartNo(raw);
+    setNr((s) => ({ ...s, key: k, cand: undefined, err: '', errKind: '' }));
+    if (!k) return;
+    const timer = setTimeout(() => {
+      window.HataRoster.lookup(String(raw)).then((j) => {
+        if (normChartNo(j.no) !== k || normChartNo(chartRef.current) !== k) return; // 打ち直したあとに届いた古い返事は捨てる
+        setNr((s) => s.key !== k ? s : { ...s, cand: j.found && j.item ? nrToDictItem(j.item) : null, asof: j.asof || '', stale: !!j.stale });
+      }, (e) => {setNr((s) => s.key !== k ? s : { ...s, err: nrErrText(e), errKind: e && e.kind || '', paired: e && e.kind === 'unpaired' ? null : s.paired });});
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [form.chartNo, nr.paired, dictPicked]);
+  // つながらないとき（net）だけ、この端末の予測変換辞書があればそちらで。止められた鍵では辞書に戻さない
+  const useNet = !existing && !!nr.paired && !(nr.errKind === 'net' && dict && dict.items && dict.items.length);
+  const nrRefresh = () => {window.HataRoster.refresh().then((j) => window.alert(j.started ? '名簿の取り直しを始めました（数分かかります。終わったら番号を入れ直してください）' : j.running ? '名簿を取り直している最中です' : '少し前に取り直したばかりです（' + Math.ceil((j.wait || 60) / 60) + '分後から）'), (e) => window.alert(nrErrText(e)));};
   // 候補タップ→フォームへ適用（OCRのapplyExtractedと同型）。フリガナ・性別はCSVに無いため手入力
   const seiKanaRef = useRef(); // v57: 辞書適用後はフリガナ欄へ誘導（CSVにカナが無く必ず手入力になるため）
   const applyDictEntry = (it) => {
     set('chartNo', it[0]);set('sei', it[1]);set('mei', it[2]);
     if (it[3]) {set('birth', it[3]);setBd(parseBirth(it[3]));}
+    if (it[4]) {set('seiKana', it[4]);set('meiKana', it[5] || '');} // Mac mini の名簿にカナ・性別があれば
+    if (it[6] && !form.gender) {set('gender', it[6]);}
     setDictPicked(true);
     setTimeout(() => {try {seiKanaRef.current && seiKanaRef.current.focus();} catch (e) {}}, 60);
   };
@@ -3613,9 +3836,26 @@ function PatientForm({ patientId, returnTo }) {
     React.createElement("div", null, /*#__PURE__*/
     React.createElement("label", { className: "block text-sm font-medium text-gray-700 mb-1" }, "\u30AB\u30EB\u30C6\u756A\u53F7"), /*#__PURE__*/
     React.createElement("input", { type: "text", value: form.chartNo, onChange: (e) => {set('chartNo', e.target.value);setDictPicked(false);}, placeholder: "\u4F8B\uFF0912345", className: ic, inputMode: "numeric" }),
-    !existing && dict && dict.items && dict.items.length > 0 && !form.chartNo && /*#__PURE__*/
+    useNet && !form.chartNo && /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1" }, "\uD83D\uDCD6 \u30AB\u30EB\u30C6\u756A\u53F7\u3092\u5165\u308C\u308B\u3068\u3001\u9662\u5185\u306E Mac mini \u306E\u540D\u7C3F\u304B\u3089\u6C0F\u540D\u30FB\u751F\u5E74\u6708\u65E5\u3092\u5F15\u304D\u307E\u3059"),
+    useNet && !dictPicked && nr.key && (
+    nr.err ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-red-600 mt-1.5", "data-testid": "nr-msg" }, nr.err, "\uFF08\u6C0F\u540D\u306F\u624B\u3067\u5165\u308C\u3066\u304F\u3060\u3055\u3044\uFF09") :
+    nr.cand === undefined ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1.5", "data-testid": "nr-msg" }, "\u540D\u7C3F\uFF08Mac mini\uFF09\u306B\u805E\u3044\u3066\u3044\u307E\u3059\u2026") :
+    !nr.cand ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mt-1.5", "data-testid": "nr-msg" }, "\u540D\u7C3F\u306B\u3053\u306E\u30AB\u30EB\u30C6\u756A\u53F7\u306E\u4EBA\u306F\u3044\u307E\u305B\u3093\uFF08", fmtNrAsof(nr.asof), "\uFF09\u3002\u4ECA\u65E5\u306F\u3058\u3081\u3066\u6765\u305F\u65B9\u306A\u3089 ", /*#__PURE__*/React.createElement("button", { type: "button", className: "underline text-indigo-700", onClick: nrRefresh }, "\u540D\u7C3F\u3092\u53D6\u308A\u76F4\u3059")) : /*#__PURE__*/
+    React.createElement("div", { className: "mt-2 rounded-xl border border-indigo-200 bg-indigo-50/50 overflow-hidden", "data-testid": "nr-cand" }, /*#__PURE__*/
+    React.createElement(TapButton, { onClick: () => applyDictEntry(nr.cand), className: "w-full flex items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-indigo-100" }, /*#__PURE__*/
+    React.createElement("span", { className: "font-mono text-gray-500 flex-shrink-0" }, nr.cand[0]), /*#__PURE__*/
+    React.createElement("span", { className: "font-medium text-gray-800 flex-1 truncate text-left" }, nr.cand[1], nr.cand[2] ? ` ${nr.cand[2]}` : ''),
+    nr.cand[3] ? /*#__PURE__*/React.createElement("span", { className: "text-xs text-gray-400 flex-shrink-0" }, nr.cand[3]) : /*#__PURE__*/
+    React.createElement("span", { className: "text-xs text-gray-300 flex-shrink-0" }, "\u751F\u5E74\u6708\u65E5\u306A\u3057"),
+    regNos.has(normChartNo(nr.cand[0])) && /*#__PURE__*/
+    React.createElement("span", { className: "text-[10px] font-medium text-green-700 bg-green-100 rounded px-1.5 py-0.5 flex-shrink-0" }, "\u767B\u9332\u6E08\u307F")
+    ), /*#__PURE__*/
+    React.createElement("p", { className: "text-[11px] text-gray-500 px-3 py-1.5" }, "\u540D\u7C3F\uFF1AMac mini\u30FB", fmtNrAsof(nr.asof), nr.stale ? '・古くなっています' : '')
+    )),
+
+    !useNet && !existing && dict && dict.items && dict.items.length > 0 && !form.chartNo && /*#__PURE__*/
     React.createElement("p", { className: "text-xs text-gray-400 mt-1" }, "\uD83D\uDCD6 \u30AB\u30EB\u30C6\u756A\u53F7\u3092\u5165\u529B\u3059\u308B\u3068\u8F9E\u66F8\uFF08", dict.items.length.toLocaleString(), "\u540D\uFF09\u304B\u3089\u5019\u88DC\u304C\u51FA\u307E\u3059"),
-    dictCands.length > 0 && /*#__PURE__*/
+    !useNet && dictCands.length > 0 && /*#__PURE__*/
     React.createElement("div", { className: "mt-2 rounded-xl border border-indigo-200 bg-indigo-50/50 divide-y divide-indigo-100 overflow-hidden" },
     dictCands.map((it) => /*#__PURE__*/
     React.createElement(TapButton, { key: it[0], onClick: () => applyDictEntry(it),
@@ -6080,6 +6320,8 @@ function runSelfTests() {
   t('氏名分割: スペース無しは姓のみ', splitName('山田'), ['山田', '']);
   t('カルテ番号: 全角と先頭ゼロ', normChartNo('００１２３'), '123');
   t('カルテ番号: 空', normChartNo(''), '');
+  t('v75: 名簿（Mac mini）の答え→辞書と同じ形（番号・姓・名・生年月日・セイ・メイ・性別）', nrToDictItem({ no: '070001', sei: '架空', mei: '一郎', birth: '1950-01-02', seiKana: 'カクウ', meiKana: 'イチロウ', sex: 'male' }), ['070001', '架空', '一郎', '1950-01-02', 'カクウ', 'イチロウ', 'male']);
+  t('v75: 名簿（Mac mini）の答えが空でも落ちない', nrToDictItem(null), ['', '', '', '', '', '', '']);
   t('CSV生年月日: スラッシュ', parseCsvBirth('1950/01/02'), '1950-01-02');
   t('CSV生年月日: 和暦漢字は非対応で空', parseCsvBirth('昭和25年'), '');
   const dict = buildChartDict([['患者番号', '患者氏名', '生年月日'], ['7', '山田　太郎', '1950/01/02'], ['7', '山田　太郎', '']], 'UTF-8');
