@@ -1430,7 +1430,7 @@ function save(key, val, notify) {
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
 // v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
-const APP_VERSION = '75'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '76'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1861,6 +1861,8 @@ function saveChartDict(dict) {
   }
 }
 function clearChartDict() {try {localStorage.removeItem(CHART_DICT_KEY);} catch (e) {}_chartDictCache = null;}
+// 段階3（v76・2026-10-30 院長「段階3もいこうか」）：名簿は Mac mini だけ。前に取り込んだ端末の辞書は起動したときに消す
+try {if (localStorage.getItem(CHART_DICT_KEY) != null) clearChartDict();} catch (e) {}
 // 患者名簿（Mac mini）＝院内の Mac mini に1人ずつ聞く（v75。設計: 書類・資料/企画・レポート/患者名簿の自動取り込み_設計.html）
 // iPad には名簿を置かない。並走の間は、Mac mini につながらないときだけ、上の予測変換辞書（この端末の中）があればそれを使う。
 // 聞いた答えは画面に出すだけで覚えない（タップして保存した患者は今までどおり）。窓口につなぐ部品は ROSTER-CLIENT（window.HataRoster）
@@ -2906,8 +2908,39 @@ function StepBar({ steps, current, onJump, allJump }) {
 }
 function PatientSelect({ onSelect, selected, flowPage }) {
   const nav = useNav();
-  const { patients, assessments, deletePatient } = useS();
+  const { patients, assessments, deletePatient, addPatient, nextNo } = useS();
   const [q, setQ] = useState('');
+  // ── 患者名簿（Mac mini）：検索欄にカルテ番号を入れたら、止まって少しで名簿に聞く。まだ登録していなければ1回のタップで登録して開く
+  //    （v76・院長「手順が多すぎる」。フリガナは任意。性別は基準値に要るので、名簿に無ければ「男性で／女性で」を選ぶボタンにする）
+  const [nrPaired, setNrPaired] = useState(null);
+  const [nrHit, setNrHit] = useState(null); // {k, item|null, asof} か {k, err}
+  const qRef = useRef(q);qRef.current = q;
+  useEffect(() => {if (window.HataRoster) window.HataRoster.info().then(setNrPaired).catch(() => {});}, []);
+  useEffect(() => {
+    const raw = q.trim();setNrHit(null);
+    if (!nrPaired || !/^[0-9０-９]+$/.test(raw)) return;
+    const k = normChartNo(raw);
+    if (patients.some((p) => normChartNo(p.chartNo) === k)) return; // 登録済みなら一覧に出る
+    const timer = setTimeout(() => {
+      window.HataRoster.lookup(raw).then((j) => {
+        if (normChartNo(qRef.current.trim()) !== k || normChartNo(j.no) !== k) return; // 打ち直したあとに届いた古い返事は捨てる
+        setNrHit({ k, item: j.found && j.item ? nrToDictItem(j.item) : null, asof: j.asof || '' });
+      }, (e) => {if (normChartNo(qRef.current.trim()) === k) setNrHit({ k, err: nrErrText(e) });});
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [q, nrPaired]);
+  const quickAdd = (it, gender) => {
+    const k = normChartNo(it[0]);
+    const reg = patients.find((p) => normChartNo(p.chartNo) === k);
+    if (reg) {onSelect(reg.id);return;}
+    const name = `${it[1]} ${it[2]}`,sk = it[4] || '',mk = it[5] || '';
+    const dup = patients.find((p) => p.name === name && p.birth === it[3]);
+    if (dup && !window.confirm(`同じ患者さんが登録済みかもしれません：\n${dup.no} ${dup.name}（${dup.birth}）\n\nそれでも新しく登録しますか？`)) {onSelect(dup.id);return;}
+    const np = { id: generateId(), no: nextNo(), chartNo: it[0], sei: it[1], mei: it[2], seiKana: sk, meiKana: mk, name, kana: sk || mk ? `${sk} ${mk}` : '',
+      birth: it[3], gender, notes: '', createdAt: new Date().toISOString() };
+    if (!addPatient(np)) return; // 保存に失敗したら警告は save() が出す
+    setQ('');setNrHit(null);onSelect(np.id);
+  };
   const [del, setDel] = useState(null); // 削除確認モーダル対象の患者id
   const [showAll, setShowAll] = useState(false); // 既定は流れに応じた年齢で絞り込み。trueで全年齢表示
   // ひらがな入力でもカタカナのフリガナにヒットさせる（hira2kataで変換）
@@ -2942,7 +2975,22 @@ function PatientSelect({ onSelect, selected, flowPage }) {
     React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6" }, /*#__PURE__*/
     React.createElement("h2", { className: "font-semibold text-gray-800 mb-4" }, "\u60A3\u8005\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044"), /*#__PURE__*/
     React.createElement("input", { type: "search", value: q, onChange: (e) => setQ(e.target.value), placeholder: "\u30AB\u30EB\u30C6\u756A\u53F7\u30FB\u6C0F\u540D\u30FB\u30D5\u30EA\u30AC\u30CA\u3067\u691C\u7D22",
-      className: "w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-400" }), /*#__PURE__*/
+      className: "w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-400" }),
+    nrPaired && /^[0-9０-９]+$/.test(q.trim()) && !nrHit && !patients.some((p) => normChartNo(p.chartNo) === normChartNo(q)) && /*#__PURE__*/
+    React.createElement("p", { className: "text-xs text-gray-400 mb-2" }, "\u540D\u7C3F\uFF08Mac mini\uFF09\u306B\u805E\u3044\u3066\u3044\u307E\u3059\u2026"),
+    nrHit && (nrHit.err ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-red-600 mb-2", "data-testid": "nr-quick-msg" }, nrHit.err) :
+    !nrHit.item ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mb-2", "data-testid": "nr-quick-msg" }, "\u540D\u7C3F\u306B\u3053\u306E\u30AB\u30EB\u30C6\u756A\u53F7\u306E\u4EBA\u306F\u3044\u307E\u305B\u3093\uFF08", fmtNrAsof(nrHit.asof), "\uFF09\u3002") : /*#__PURE__*/
+    React.createElement("div", { className: "mb-3 rounded-xl border border-indigo-200 bg-indigo-50/50 px-3 py-2.5", "data-testid": "nr-quick" }, /*#__PURE__*/
+    React.createElement("div", { className: "text-sm" }, /*#__PURE__*/React.createElement("span", { className: "font-mono text-gray-500 mr-2" }, nrHit.item[0]), /*#__PURE__*/React.createElement("span", { className: "font-medium" }, nrHit.item[1], " ", nrHit.item[2]), /*#__PURE__*/
+    React.createElement("span", { className: "text-xs text-gray-500 ml-2" }, nrHit.item[3] || '生年月日なし')),
+    !nrHit.item[3] ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mt-1" }, "\u540D\u7C3F\u306B\u751F\u5E74\u6708\u65E5\u304C\u7121\u3044\u306E\u3067\u300C\uFF0B\u65B0\u898F\u60A3\u8005\u300D\u304B\u3089\u767B\u9332\u3057\u3066\u304F\u3060\u3055\u3044\u3002") :
+    nrHit.item[6] ? /*#__PURE__*/React.createElement(TapButton, { onClick: () => quickAdd(nrHit.item, nrHit.item[6]), className: "mt-2 w-full py-2.5 rounded-xl font-semibold text-white bg-blue-600" }, "\uFF0B \u767B\u9332\u3057\u3066\u958B\u304F") : /*#__PURE__*/
+    React.createElement("div", { className: "mt-2 grid grid-cols-2 gap-2" }, /*#__PURE__*/
+    React.createElement(TapButton, { onClick: () => quickAdd(nrHit.item, 'male'), className: "py-2.5 rounded-xl font-semibold text-white bg-blue-600" }, "\uFF0B \u7537\u6027\u3067\u767B\u9332"), /*#__PURE__*/
+    React.createElement(TapButton, { onClick: () => quickAdd(nrHit.item, 'female'), className: "py-2.5 rounded-xl font-semibold text-white bg-pink-600" }, "\uFF0B \u5973\u6027\u3067\u767B\u9332")
+    ), /*#__PURE__*/
+    React.createElement("p", { className: "text-[11px] text-gray-500 mt-1" }, "\u540D\u7C3F\uFF1AMac mini\u30FB", fmtNrAsof(nrHit.asof))
+    )), /*#__PURE__*/
 
     React.createElement("div", { className: "flex items-center justify-between gap-2 mb-3" }, /*#__PURE__*/
     React.createElement("button", { onClick: () => nav({ p: 'patientForm', returnTo: flowPage }),
@@ -3580,23 +3628,6 @@ function Settings() {
     React.createElement(RosterNetCard, null), /*#__PURE__*/
 
 
-    React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6 space-y-4" }, /*#__PURE__*/
-    React.createElement("div", null, /*#__PURE__*/
-    React.createElement("h2", { className: "font-semibold text-gray-800" }, "\uD83D\uDCD6 \u4E88\u6E2C\u5909\u63DB\u8F9E\u66F8\uFF08\u30EC\u30BB\u30B3\u30F3CSV\u30FB\u3053\u306E\u7AEF\u672B\u306E\u4E2D\uFF09"), /*#__PURE__*/
-    React.createElement("p", { className: "text-xs text-gray-500 mt-1" }, "\u30EC\u30BB\u30B3\u30F3\u306E\u4E88\u7D04CSV\uFF08\u5168\u60A3\u8005\u5206\uFF09\u3092\u53D6\u308A\u8FBC\u3080\u3068\u3001\u65B0\u898F\u60A3\u8005\u306E\u767B\u9332\u6642\u306B\u30AB\u30EB\u30C6\u756A\u53F7\u3092\u5165\u308C\u308B\u3060\u3051\u3067\u6C0F\u540D\u30FB\u751F\u5E74\u6708\u65E5\u306E\u5019\u88DC\u304C\u51FA\u3066\u81EA\u52D5\u5165\u529B\u3067\u304D\u307E\u3059\u3002\u60A3\u8005\u4E00\u89A7\u306B\u306F\u8868\u793A\u3055\u308C\u307E\u305B\u3093\u3002")
-    ),
-    dictInfo ? /*#__PURE__*/
-    React.createElement("div", { className: "text-sm text-gray-700" }, "\u53D6\u8FBC\u6E08\u307F\uFF1A", /*#__PURE__*/React.createElement("span", { className: "font-semibold" }, dictInfo.n.toLocaleString(), "\u540D"), /*#__PURE__*/
-    React.createElement("span", { className: "text-xs text-gray-400 ml-1" }, "\uFF08", new Date(dictInfo.at).toLocaleDateString('ja-JP'), " \u53D6\u8FBC\u30FB", dictInfo.enc, "\u30FB\u7D04", dictMb().toFixed(1), "MB\uFF09")) : /*#__PURE__*/
-    React.createElement("p", { className: "text-sm text-gray-400" }, "\u672A\u53D6\u8FBC"), /*#__PURE__*/
-    React.createElement("input", { ref: dictFileRef, type: "file", accept: ".csv,text/csv", "data-testid": "dict-csv-input", className: "hidden", onChange: onDictFile }), /*#__PURE__*/
-    React.createElement(TapButton, { onClick: () => dictFileRef.current && dictFileRef.current.click(), disabled: dictBusy,
-      className: "w-full py-3 rounded-xl font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50" },
-    dictBusy ? '⏳ 読み込み中…（数万行でも数秒です）' : '📥 予約CSVを取り込む（前回の辞書と置き換え）'),
-    dictInfo && /*#__PURE__*/React.createElement(TapButton, { onClick: onDictClear, className: "w-full py-2 rounded-xl text-sm text-red-600 bg-red-50 hover:bg-red-100" }, "\uD83D\uDDD1 \u8F9E\u66F8\u3092\u524A\u9664"),
-    dictMsg && /*#__PURE__*/React.createElement("p", { className: `text-sm ${dictMsg.type === 'ok' ? 'text-green-600' : 'text-red-600'}` }, dictMsg.text), /*#__PURE__*/
-    React.createElement("p", { className: "text-xs text-gray-400" }, "\u8F9E\u66F8\u306F\u3053\u306E\u7AEF\u672B\u306E\u4E2D\u3060\u3051\u306B\u4FDD\u5B58\u3055\u308C\u307E\u3059\uFF08\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u306B\u306F\u542B\u307E\u308C\u307E\u305B\u3093\uFF09\u3002iPad\u3054\u3068\u306B\u53D6\u8FBC\u304C\u5FC5\u8981\u3067\u3059\u3002\u60A3\u8005\u304C\u5897\u3048\u305F\u3089\u65B0\u3057\u3044CSV\u3092\u53D6\u308A\u8FBC\u307F\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002")
-    ), /*#__PURE__*/
 
 
     React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6 space-y-4" }, /*#__PURE__*/
@@ -3724,7 +3755,6 @@ function PatientForm({ patientId, returnTo }) {
     const e = {};
     if (!form.sei.trim()) e.sei = '姓を入力してください';
     if (!form.mei.trim()) e.mei = '名を入力してください';
-    if (!form.seiKana.trim() || !form.meiKana.trim()) e.kana = 'フリガナ（セイ・メイ）を入力してください';
     if (!form.birth) e.birth = '生年月日を入力してください';
     if (form.gender !== 'male' && form.gender !== 'female') e.gender = '性別を選んでください（口唇閉鎖力などの基準値が男女で違います）';
     setErrs(e);return Object.keys(e).length === 0;
@@ -3732,7 +3762,8 @@ function PatientForm({ patientId, returnTo }) {
   const save_ = () => {
     if (!validate()) return;
     // 表示用のname/kanaは姓名から組み立て（既存コードとの互換のため空白1つで結合）
-    const payload = { ...form, name: `${form.sei.trim()} ${form.mei.trim()}`, kana: `${form.seiKana.trim()} ${form.meiKana.trim()}` };
+    const sk = form.seiKana.trim(),mk = form.meiKana.trim(); // フリガナは任意（v76・カルテ番号で管理する＝院長 2026-10-30）
+    const payload = { ...form, name: `${form.sei.trim()} ${form.mei.trim()}`, kana: sk || mk ? `${sk} ${mk}` : '' };
     const ok = existing ? updatePatient({ ...existing, ...payload }) : addPatient({ id: generateId(), no: nextNo(), ...payload, createdAt: new Date().toISOString() });
     if (!ok) return; // v70: 保存に失敗したら画面に留まる（警告は save() が出す。入力はそのまま残る）
     setSaved(true);setTimeout(back, 800);
@@ -3752,7 +3783,7 @@ function PatientForm({ patientId, returnTo }) {
     return any;
   };
   // ── 予測変換辞書（設定画面で取り込んだレセコンCSV）：カルテ番号の前方一致で候補を出す ──
-  const dict = useMemo(() => existing ? null : getChartDict(), []); // 新規登録時のみ。マウント時に1回読む（遅延キャッシュ）
+  const dict = null; // 段階3（v76）：端末の辞書は使わない（名簿は Mac mini だけ）。下の候補の作りは残してあるが空のまま
   const [dictPicked, setDictPicked] = useState(false); // 候補を適用済み（リストを閉じ、番号を手で変えたら再表示）
   // 登録済み患者のカルテ番号集合（候補に「登録済み」バッジを出す）
   const regNos = useMemo(() => new Set(patients.map((p) => normChartNo(p.chartNo)).filter(Boolean)), [patients]);
@@ -3785,8 +3816,7 @@ function PatientForm({ patientId, returnTo }) {
     }, 450);
     return () => clearTimeout(timer);
   }, [form.chartNo, nr.paired, dictPicked]);
-  // つながらないとき（net）だけ、この端末の予測変換辞書があればそちらで。止められた鍵では辞書に戻さない
-  const useNet = !existing && !!nr.paired && !(nr.errKind === 'net' && dict && dict.items && dict.items.length);
+  const useNet = !existing && !!nr.paired; // 段階3：つながらないときは手で入れる（端末の辞書には戻らない）
   const nrRefresh = () => {window.HataRoster.refresh().then((j) => window.alert(j.started ? '名簿の取り直しを始めました（数分かかります。終わったら番号を入れ直してください）' : j.running ? '名簿を取り直している最中です' : '少し前に取り直したばかりです（' + Math.ceil((j.wait || 60) / 60) + '分後から）'), (e) => window.alert(nrErrText(e)));};
   // 候補タップ→フォームへ適用（OCRのapplyExtractedと同型）。フリガナ・性別はCSVに無いため手入力
   const seiKanaRef = useRef(); // v57: 辞書適用後はフリガナ欄へ誘導（CSVにカナが無く必ず手入力になるため）
@@ -3837,6 +3867,7 @@ function PatientForm({ patientId, returnTo }) {
     React.createElement("label", { className: "block text-sm font-medium text-gray-700 mb-1" }, "\u30AB\u30EB\u30C6\u756A\u53F7"), /*#__PURE__*/
     React.createElement("input", { type: "text", value: form.chartNo, onChange: (e) => {set('chartNo', e.target.value);setDictPicked(false);}, placeholder: "\u4F8B\uFF0912345", className: ic, inputMode: "numeric" }),
     useNet && !form.chartNo && /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1" }, "\uD83D\uDCD6 \u30AB\u30EB\u30C6\u756A\u53F7\u3092\u5165\u308C\u308B\u3068\u3001\u9662\u5185\u306E Mac mini \u306E\u540D\u7C3F\u304B\u3089\u6C0F\u540D\u30FB\u751F\u5E74\u6708\u65E5\u3092\u5F15\u304D\u307E\u3059"),
+    !existing && nr.paired === null && window.HataRoster && /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1" }, "\uD83D\uDCD6 \u8A2D\u5B9A\uFF08\u2699\uFE0F\uFF09\u306E\u300C\u60A3\u8005\u540D\u7C3F\uFF08Mac mini\uFF09\u300D\u3067\u3064\u306A\u3050\u3068\u3001\u30AB\u30EB\u30C6\u756A\u53F7\u3067\u6C0F\u540D\u30FB\u751F\u5E74\u6708\u65E5\u304C\u5165\u308A\u307E\u3059"),
     useNet && !dictPicked && nr.key && (
     nr.err ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-red-600 mt-1.5", "data-testid": "nr-msg" }, nr.err, "\uFF08\u6C0F\u540D\u306F\u624B\u3067\u5165\u308C\u3066\u304F\u3060\u3055\u3044\uFF09") :
     nr.cand === undefined ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1.5", "data-testid": "nr-msg" }, "\u540D\u7C3F\uFF08Mac mini\uFF09\u306B\u805E\u3044\u3066\u3044\u307E\u3059\u2026") :
@@ -3870,7 +3901,7 @@ function PatientForm({ patientId, returnTo }) {
     )
     ),
 
-    dictPicked && /*#__PURE__*/React.createElement("p", { className: "text-xs text-amber-700 font-medium mt-1.5" }, "\uD83D\uDCD6 \u8F9E\u66F8\u304B\u3089\u5165\u529B\u3057\u307E\u3057\u305F \u2014 \u30D5\u30EA\u30AC\u30CA\u3092\u5165\u529B\u3057\u3001\u6027\u5225\u30FB\u5185\u5BB9\u3092\u78BA\u8A8D\u3057\u3066\u304B\u3089\u4FDD\u5B58\u3057\u3066\u304F\u3060\u3055\u3044\u3002")
+    dictPicked && /*#__PURE__*/React.createElement("p", { className: "text-xs text-amber-700 font-medium mt-1.5" }, "\uD83D\uDCD6 \u540D\u7C3F\u304B\u3089\u5165\u529B\u3057\u307E\u3057\u305F \u2014 \u6027\u5225\u30FB\u5185\u5BB9\u3092\u78BA\u8A8D\u3057\u3066\u304B\u3089\u4FDD\u5B58\u3057\u3066\u304F\u3060\u3055\u3044\u3002")
     ), /*#__PURE__*/
     React.createElement("div", null, /*#__PURE__*/
     React.createElement("label", { className: "block text-sm font-medium text-gray-700 mb-1" }, "\u6C0F\u540D *"), /*#__PURE__*/
@@ -3881,7 +3912,7 @@ function PatientForm({ patientId, returnTo }) {
     (errs.sei || errs.mei) && /*#__PURE__*/React.createElement("p", { className: "text-xs text-red-500 mt-1" }, errs.sei || errs.mei)
     ), /*#__PURE__*/
     React.createElement("div", null, /*#__PURE__*/
-    React.createElement("label", { className: "block text-sm font-medium text-gray-700 mb-1" }, "\u30D5\u30EA\u30AC\u30CA *"), /*#__PURE__*/
+    React.createElement("label", { className: "block text-sm font-medium text-gray-700 mb-1" }, "\u30D5\u30EA\u30AC\u30CA\uFF08\u4EFB\u610F\uFF09"), /*#__PURE__*/
     React.createElement("div", { className: "grid grid-cols-2 gap-3" }, /*#__PURE__*/
     React.createElement("input", { ref: seiKanaRef, type: "text", value: form.seiKana, onChange: onKanaChange('seiKana'), placeholder: "\u30BB\u30A4\uFF09\u30E4\u30DE\u30C0", className: ic }), /*#__PURE__*/
     React.createElement("input", { type: "text", value: form.meiKana, onChange: onKanaChange('meiKana'), placeholder: "\u30E1\u30A4\uFF09\u30BF\u30ED\u30A6", className: ic })
@@ -6322,6 +6353,7 @@ function runSelfTests() {
   t('カルテ番号: 空', normChartNo(''), '');
   t('v75: 名簿（Mac mini）の答え→辞書と同じ形（番号・姓・名・生年月日・セイ・メイ・性別）', nrToDictItem({ no: '070001', sei: '架空', mei: '一郎', birth: '1950-01-02', seiKana: 'カクウ', meiKana: 'イチロウ', sex: 'male' }), ['070001', '架空', '一郎', '1950-01-02', 'カクウ', 'イチロウ', 'male']);
   t('v75: 名簿（Mac mini）の答えが空でも落ちない', nrToDictItem(null), ['', '', '', '', '', '', '']);
+  t('v76: 段階3＝端末の辞書は起動時に消えている', (() => {try {return localStorage.getItem(CHART_DICT_KEY);} catch (e) {return null;}})(), null);
   t('CSV生年月日: スラッシュ', parseCsvBirth('1950/01/02'), '1950-01-02');
   t('CSV生年月日: 和暦漢字は非対応で空', parseCsvBirth('昭和25年'), '');
   const dict = buildChartDict([['患者番号', '患者氏名', '生年月日'], ['7', '山田　太郎', '1950/01/02'], ['7', '山田　太郎', '']], 'UTF-8');
