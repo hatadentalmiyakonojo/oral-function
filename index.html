@@ -2497,7 +2497,7 @@ const KIDS_TRAININGS = {
     note: ['「ポン」と鳴らない・舌が上がりにくいときは、舌小帯が短いことがあるため歯科で確認'] },
   lip: { key: 'lip', no: 2, icon: '💪', name: '唇を閉じて、鼻で息（りっぷるとれーなー）',
     steps: ['奥歯をかみ合わせ、器具を前歯にそわせて、上下の唇ではさむ。', 'リングを前に引き、唇でこらえて3つ数える（小さい子は保護者が引く）', '前・右・左に10回ずつ。1日30回。'],
-    point: ['唇の力がついても、それだけでふだん口を閉じるようになるとは限らない', '口が開いていたら、唇を閉じて鼻で息をするよう声をかけてください'],
+    point: ['3歳から', '唇の力がついても、それだけでふだん口を閉じるようになるとは限らない', '口が開いていたら、唇を閉じて鼻で息をするよう声をかけてください'], // 3歳から＝院長 11/7
     note: ['鼻がつまって鼻で息ができないときは、お知らせください。', '器具は使う前に水で洗い、ほかの人と使い回しません。ひびや変形が出たら取りかえます。'] },
   aiube: { key: 'aiube', no: 3, icon: '👄', name: 'あいうべ体操',
     steps: ADULT_TRAININGS.D.steps, point: ADULT_TRAININGS.D.point, note: ADULT_TRAININGS.D.note },
@@ -2505,7 +2505,7 @@ const KIDS_TRAININGS = {
     steps: ADULT_TRAININGS.F.steps, point: ADULT_TRAININGS.F.point, note: [] },
   gum: { key: 'gum', no: 5, icon: '🍬', name: 'ガムでかむ練習',
     steps: ['ガムを右と左の奥歯で、同じくらいかむ。', 'やわらかくなったら舌で丸め、上の前歯のうしろに押しつけて、上あごに広げる。', 'その舌の位置のまま、つばを3回飲みこむ。'],
-    point: ['子どもは食後に1回5分、1日2回', 'かみ終わったガムは飲みこまず、紙に包んで捨てる'],
+    point: ['子どもは小学生から。食後に1回5分、1日2回', 'かみ終わったガムは飲みこまず、紙に包んで捨てる'], // 小学生から＝院長 11/7
     note: ['入れ歯の方や、ぐらぐらする歯・取れやすいつめ物がある方は、始める前にご相談ください。'] },
   posture: { key: 'posture', no: null, icon: '🪑', name: '食べるときの姿勢',
     steps: ['足の裏を、床か足置きの台につける。', '背すじをのばす。', 'お茶や水で流しこまず、飲むのは食後にする。'],
@@ -2682,8 +2682,23 @@ const TRAINING_PRIORITY = {
 };
 // v77: 練習は記号（KIDS_TRAININGS のキー）で重なりを消す（v76 までは名前で消していたので、名前の違う同じパタカラが2枚出た）。
 //      opts.pre＝離乳前（別紙1）は練習を出さない（食べ方は KIDS_PRE_FEEDING）。各練習に forLabels（どの結果のための練習か）を付ける
+// v77: 年齢で出さない練習（院長 11/7「ガムは小学生から　りっぷるとれーなーは3歳」）。生年月日が分からないときは止めない
+//   小学生＝4月2日〜翌4月1日生まれが同じ学年。満6歳になった年度（4月1日生まれは前の年度）の翌年度の4月1日から
+function schoolEntryDate(birth) {
+  if (!birth) return null;
+  const [y, m, d] = String(birth).slice(0, 10).split('-').map(Number);if (!y || !m || !d) return null;
+  const late = m > 4 || m === 4 && d >= 2; // 4月2日以降に生まれた子は1年おそい
+  return `${y + (late ? 7 : 6)}-04-01`;
+}
+function trainingAgeOk(key, birth, dateStr) {
+  if (!birth) return true;
+  if (key === 'gum') {const e = schoolEntryDate(birth);return !e || String(dateStr || new Date().toISOString()).slice(0, 10) >= e;}
+  if (key === 'lip') {const y = yearsAtDate(birth, dateStr);return y == null || y >= 3;}
+  return true;
+}
 function prescribeTrainings(matchedPatterns, opts) {
   if (opts && opts.pre) return [];
+  const birth = opts && opts.birth,onDate = opts && opts.date;
   const ordered = [...(matchedPatterns || [])].sort((a, b) => {
     if (a.type !== b.type) return a.type === 'primary' ? -1 : 1;
     return (b.matched?.length || 0) - (a.matched?.length || 0);
@@ -2693,7 +2708,7 @@ function prescribeTrainings(matchedPatterns, opts) {
   for (const { patternId, matched } of ordered) {
     const pat = PATTERNS[patternId];if (!pat) continue;
     for (const k of pat.trainings) {
-      if (!KIDS_TRAININGS[k]) continue;
+      if (!KIDS_TRAININGS[k] || !trainingAgeOk(k, birth, onDate)) continue; // 年齢に満たない練習は枠に入れない（ほかの練習が入る）
       if (!seen.has(k)) {const c = { t: KIDS_TRAININGS[k], order: cands.length, prio: TRAINING_PRIORITY[k] || 1, labels: [] };seen.set(k, c);cands.push(c);}
       const c = seen.get(k);
       patternChairLabels(patternId, matched).forEach((l) => {if (!c.labels.includes(l)) c.labels.push(l);});
@@ -4337,7 +4352,7 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
   const scoring = useMemo(() => computePediatricScoring(checkedC, cItems), [checkedC, cItems]);
   const diagnosis = useMemo(() => computePediatricDiagnosis(checkedItemObjs, lipLow, tongueLow), [checkedC, cItems, lipLow, tongueLow]);
   // v77: 管理方針の文を、当てはまった項目から自動で入れる（新しい評価だけ。過去の記録・閲覧モードでは変えない）
-  const autoNotes = useMemo(() => autoNotesPediatric(isPreWeaning, scoring.qualifies, diagnosis, checkedC), [isPreWeaning, scoring, diagnosis, checkedC]);
+  const autoNotes = useMemo(() => autoNotesPediatric(isPreWeaning, scoring.qualifies, diagnosis, checkedC, { birth: patient && patient.birth, date: isLoaded && loaded ? loaded.date : examDate }), [isPreWeaning, scoring, diagnosis, checkedC, patient, examDate]);
   const markAutoNotes = useAutoNotes(autoNotes, notes, setNotes, !ro && !isLoaded, prefillRef);
 
   // 各セッターは閲覧モード（ro）ではガードして変更を無効化する
@@ -4708,10 +4723,10 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
     React.createElement("p", { className: "text-sm text-gray-500" }, "\u5F53\u3066\u306F\u307E\u308B\u9805\u76EE\u304C\u7121\u3044\u306E\u3067\u3001\u304A\u77E5\u3089\u305B\u306B\u98DF\u3079\u65B9\u306E\u6B04\u306F\u51FA\u307E\u305B\u3093")
     ) :
     (() => {
-      const trainings = prescribeTrainings(diagnosis);
+      const trainings = prescribeTrainings(diagnosis, { birth: patient && patient.birth, date: isLoaded && loaded ? loaded.date : examDate }); // v77: 年齢で出さない練習（ガムは小学生から・りっぷるとれーなーは3歳から）
       return (/*#__PURE__*/
         React.createElement(React.Fragment, null, /*#__PURE__*/
-        React.createElement("p", { className: "text-xs text-gray-400 mb-4" }, "\u7DF4\u7FD2\u306F\u4E3B\u8A3A\u65AD\u3092\u512A\u5148\u3057\u3066\u6700\u5927", MAX_TRAININGS, "\u3064\uFF08\u98DF\u3079\u308B\u3068\u304D\u306E\u59FF\u52E2\u30FB\u304F\u305B\u30FB\u8A00\u8A9E\u8074\u899A\u58EB\u306F\u6570\u306B\u5165\u308C\u306A\u3044\uFF09\u3002\u756A\u53F7\u306F\u30C1\u30A7\u30A2\u30B5\u30A4\u30C9\u300C\u304A\u53E3\u306E\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u300D\u306E\u7DF4\u7FD2\u306E\u756A\u53F7\u3068\u540C\u3058\u3067\u3059"),
+        React.createElement("p", { className: "text-xs text-gray-400 mb-4" }, "\u7DF4\u7FD2\u306F\u4E3B\u8A3A\u65AD\u3092\u512A\u5148\u3057\u3066\u6700\u5927", MAX_TRAININGS, "\u3064\uFF08\u98DF\u3079\u308B\u3068\u304D\u306E\u59FF\u52E2\u30FB\u304F\u305B\u30FB\u8A00\u8A9E\u8074\u899A\u58EB\u306F\u6570\u306B\u5165\u308C\u306A\u3044\u30FB\u30AC\u30E0\u306F\u5C0F\u5B66\u751F\u304B\u3089\u30FB\u308A\u3063\u3077\u308B\u3068\u308C\u30FC\u306A\u30FC\u306F3\u6B73\u304B\u3089\uFF09\u3002\u756A\u53F7\u306F\u30C1\u30A7\u30A2\u30B5\u30A4\u30C9\u300C\u304A\u53E3\u306E\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u300D\u306E\u7DF4\u7FD2\u306E\u756A\u53F7\u3068\u540C\u3058\u3067\u3059"),
         trainings.length ? /*#__PURE__*/
         React.createElement("div", { className: "grid sm:grid-cols-2 gap-3" }, trainings.map((t) => /*#__PURE__*/React.createElement(TrainCardScreen, { key: t.key, t: t }))) : /*#__PURE__*/
         React.createElement("p", { className: "text-sm text-gray-500" }, "\u5F53\u3066\u306F\u307E\u308B\u578B\u304C\u7121\u3044\u306E\u3067\u3001\u7DF4\u7FD2\u306F\u51FA\u307E\u305B\u3093\uFF08\u304A\u77E5\u3089\u305B\u306E\u88CF\u9762\u3082\u51FA\u307E\u305B\u3093\uFF09"),
@@ -5823,7 +5838,7 @@ function PrintPreview({ assessmentId, from }) {
       React.createElement(PlanPediatric, { a: a, patient: patient, ageYears: age.years, prev: prevA, clinic: clinic }) : /*#__PURE__*/
       React.createElement(PlanAdult, { a: a, prev: prevA, clinic: clinic, prevVals: prevVals }) :
       isPed ? /*#__PURE__*/
-      React.createElement(PrintPediatric, { a: a, ageYears: age.years, gender: patient.gender, patientName: patient.name, prev: prevA }) : /*#__PURE__*/
+      React.createElement(PrintPediatric, { a: a, ageYears: age.years, birth: patient.birth, gender: patient.gender, patientName: patient.name, prev: prevA }) : /*#__PURE__*/
       React.createElement(PrintAdult, { a: a, patientName: patient.name, prev: prevA }), /*#__PURE__*/
 
       React.createElement("div", { style: { marginTop: '14px', paddingTop: '8px', borderTop: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, /*#__PURE__*/
@@ -5893,7 +5908,7 @@ function PrintPreview({ assessmentId, from }) {
 
 }
 
-function PrintPediatric({ a, ageYears, gender, patientName, prev }) {
+function PrintPediatric({ a, ageYears, birth, gender, patientName, prev }) {
   const { diagnosis } = a;
   // v71: 平均より少し弱い（-1SDは超える）値を「平均的な力です」と印刷していた（画面・管理計画書は「やや弱め」）→ 同じ3段階でことばを選ぶ
   const lnP = lipForceNorm(ageYears, gender),tnP = pedTongueNorm(ageYears);
@@ -5906,7 +5921,7 @@ function PrintPediatric({ a, ageYears, gender, patientName, prev }) {
   const bodyIdx = a.height && a.weight ? computeBodyIndex(ageYears, a.height, a.weight) : null;
   // v77: 離乳前（別紙1）は練習を出さず食べ方を出す（当てはまった項目があれば。型に入らない項目だけでも）。練習の番号はチェアサイド「お口のトレーニング」と同じ
   const pre = a.phase === 'pre';
-  const trainings = prescribeTrainings(patterns, { pre });
+  const trainings = prescribeTrainings(patterns, { pre, birth, date: a.date }); // v77: 年齢で出さない練習も
   const checkedIds = Array.isArray(a.checkedCItems) ? a.checkedCItems : [];
   const preFeeding = pre && checkedIds.length > 0;
   const reEval = reEvalLabel(a.date);
@@ -6113,7 +6128,7 @@ function autoNotesAdult(checkedL) {
   if (l2) out.push('口腔乾燥の改善を優先し、保湿ケアと唾液腺マッサージを指導した。');
   return out.join('\n');
 }
-function autoNotesPediatric(pre, qualifies, patterns, checkedIds) {
+function autoNotesPediatric(pre, qualifies, patterns, checkedIds, ageOpts) {
   const ids = checkedIds || [];
   if (pre) {
     if (!ids.length) return noteTpl('pediatric', 'watch');
@@ -6123,7 +6138,7 @@ function autoNotesPediatric(pre, qualifies, patterns, checkedIds) {
   const others = C_ITEMS_POST.filter((it) => ids.includes(it.id) && !(it.patterns || []).length && !/^上記以外/.test(it.label)).map((it) => it.label);
   const names = pats.map((p) => p.name).concat(others).join('、'); // 型の名前に「・」が入る（いびき・扁桃肥大）ので区切りは「、」
   if (!names) return noteTpl('pediatric', 'watch');
-  const tr = prescribeTrainings(patterns || []);
+  const tr = prescribeTrainings(patterns || [], ageOpts);
   const out = [];
   if (qualifies) {
     out.push(tr.length ? noteTpl('pediatric', 'start').replace('口腔機能発達不全症と診断。', `口腔機能発達不全症と診断（${names}）。`) :
@@ -6300,7 +6315,7 @@ function PlanPediatric({ a, patient, ageYears, prev, clinic }) {
   const gradeBg = (g) => g && g.key === 'low' ? '#fef2f2' : g && g.key === 'mid' ? '#fffbeb' : '#fff';
   const bodyIdx = a.height && a.weight ? computeBodyIndex(ageYears, a.height, a.weight) : null;
   const patterns = effectivePedPatterns(a, ageYears); // v77: 3歳未満は測定値だけで付いた型を外す（お知らせと同じ）
-  const trainings = prescribeTrainings(patterns, { pre: isPre }); // v77: 離乳前は練習を出さない
+  const trainings = prescribeTrainings(patterns, { pre: isPre, birth: patient.birth, date: a.date }); // v77: 離乳前は練習を出さない・年齢で出さない練習も
   const tLabel = isPre && (a.checkedCItems || []).length > 0 ? `${KIDS_PRE_FEEDING.name}（離乳前）` :
   trainings.map((t) => `${t.no ? `練習${t.no} ` : ''}${t.name}`).join('、');
   const pv = prev || {};
@@ -6578,6 +6593,16 @@ function runSelfTests() {
   t('v77: 3歳以上の記録は型をそのまま', effectivePedPatterns(old2, 3).length, 3);
   t('v77: 型の無い古い形でも落ちない', effectivePedPatterns({}, 2), []);
   // v77: 管理方針の文を、当てはまった項目から自動で（院長 11/7）
+  // v77: 年齢で出さない練習（院長 11/7「ガムは小学生から　りっぷるとれーなーは3歳」）
+  t('v77: 小学校に入る日（4月2日生まれ→7年後の4月1日）', schoolEntryDate('2019-04-02'), '2026-04-01');
+  t('v77: 小学校に入る日（4月1日生まれ→6年後の4月1日＝早生まれ）', schoolEntryDate('2020-04-01'), '2026-04-01');
+  {const dx = kidsDx(C_ITEMS_POST, ['C-5', 'C-10']);
+    t('v77: 年長（6歳・小学校前）はガムを出さない', prescribeTrainings(dx, { birth: '2020-06-01', date: '2026-11-07' }).map((x) => x.key), ['lip', 'aiube', 'posture']);
+    t('v77: 小学1年はガムを出す', prescribeTrainings(dx, { birth: '2019-06-01', date: '2026-11-07' }).map((x) => x.key), ['lip', 'aiube', 'gum', 'posture']);
+    t('v77: 2歳はりっぷるとれーなーもガムも出さない', prescribeTrainings(dx, { birth: '2024-05-01', date: '2026-11-07' }).map((x) => x.key), ['aiube', 'posture']);
+    t('v77: 3歳ちょうどはりっぷるとれーなーを出す', prescribeTrainings(dx, { birth: '2023-11-07', date: '2026-11-07' }).map((x) => x.key), ['lip', 'aiube', 'posture']);
+    t('v77: 生年月日が無いときは年齢で止めない', prescribeTrainings(dx).map((x) => x.key), ['lip', 'aiube', 'gum', 'posture']);
+    tOk('v77: 管理方針（2歳）にりっぷるとれーなーの文を入れない', !autoNotesPediatric(false, true, dx, ['C-5', 'C-10'], { birth: '2024-05-01', date: '2026-11-07' }).includes('りっぷるとれーなー'));}
   t('v77: 管理方針（大人）当てはまり0＝経過観察の定型文', autoNotesAdult([]), '明らかな機能低下は認めず。経過観察とし、約3か月後に再評価を行う。');
   t('v77: 管理方針（大人）3項目以上＝診断名と項目名＋訓練開始の文', autoNotesAdult(['L-7', 'L-5', 'L-6']).split('\n')[0], '口腔機能低下症と診断（低舌圧・咀嚼機能低下・嚥下機能低下）。該当項目に対応するお口の機能トレーニングを処方し、3か月間実施のうえ再評価を行う。');
   t('v77: 管理方針（大人）1〜2項目＝基準に届かない文＋機能維持', autoNotesAdult(['L-1']).split('\n'), ['口腔機能低下症の診断基準（3項目以上）には該当しないが、口腔衛生状態不良を認める。', '現在の口腔機能の維持を目標に、お口の体操の継続と定期的な経過観察を行う。', '口腔衛生状態の改善を優先し、清掃指導（舌の清掃を含む）を行った。']);
