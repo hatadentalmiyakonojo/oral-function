@@ -4336,6 +4336,9 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
   const tongueGrade = tongueMeasured ? gradeBySD(tonguePres, tongueNorm ? tongueNorm.cutoff : null, tongueNorm ? tongueNorm.mean : null, '低舌圧') : null;
   const scoring = useMemo(() => computePediatricScoring(checkedC, cItems), [checkedC, cItems]);
   const diagnosis = useMemo(() => computePediatricDiagnosis(checkedItemObjs, lipLow, tongueLow), [checkedC, cItems, lipLow, tongueLow]);
+  // v77: 管理方針の文を、当てはまった項目から自動で入れる（新しい評価だけ。過去の記録・閲覧モードでは変えない）
+  const autoNotes = useMemo(() => autoNotesPediatric(isPreWeaning, scoring.qualifies, diagnosis, checkedC), [isPreWeaning, scoring, diagnosis, checkedC]);
+  const markAutoNotes = useAutoNotes(autoNotes, notes, setNotes, !ro && !isLoaded, prefillRef);
 
   // 各セッターは閲覧モード（ro）ではガードして変更を無効化する
   const toggleC = (id) => {if (ro) return;setCheckedC((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]);};
@@ -4682,9 +4685,10 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
     ), /*#__PURE__*/
 
     React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6" }, /*#__PURE__*/
-    React.createElement("h2", { className: "font-semibold text-gray-800 mb-3" }, "\uD83D\uDCDD \u30E1\u30E2\u30FB\u7BA1\u7406\u65B9\u91DD"), /*#__PURE__*/
-    React.createElement("p", { className: "text-xs text-gray-400 mb-2" }, "\u5224\u5B9A\u7D50\u679C\u3092\u8E0F\u307E\u3048\u305F\u7BA1\u7406\u65B9\u91DD\u3092\u8A18\u5165\uFF08\u7BA1\u7406\u8A08\u753B\u66F8\u306B\u5370\u5B57\u3055\u308C\u307E\u3059\uFF09"), /*#__PURE__*/
-    React.createElement("textarea", { value: notes, onChange: (e) => setNotesRO(e.target.value), disabled: ro, rows: 3, placeholder: "\u691C\u67FB\u4E2D\u306E\u69D8\u5B50\u30FB\u7BA1\u7406\u65B9\u91DD\u306A\u3069", onFocus: focusIntoView,
+    React.createElement("h2", { className: "font-semibold text-gray-800 mb-3" }, "\uD83D\uDCDD \u30E1\u30E2\u30FB\u7BA1\u7406\u65B9\u91DD"),
+    ro ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mb-2" }, "\u7BA1\u7406\u8A08\u753B\u66F8\u3068\u304A\u77E5\u3089\u305B\u306B\u5370\u5B57\u3055\u308C\u307E\u3059") : /*#__PURE__*/
+    React.createElement(AutoNotesBar, { notes: notes, autoText: autoNotes, setNotes: setNotes, onReplaced: markAutoNotes }), /*#__PURE__*/
+    React.createElement("textarea", { value: notes, onChange: (e) => setNotesRO(e.target.value), disabled: ro, rows: 5, placeholder: "\u691C\u67FB\u4E2D\u306E\u69D8\u5B50\u30FB\u7BA1\u7406\u65B9\u91DD\u306A\u3069", onFocus: focusIntoView,
       className: `w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none ${ro ? 'opacity-60 bg-gray-100' : ''}` }),
     !ro && /*#__PURE__*/React.createElement(NoteTemplates, { kind: "pediatric", notes: notes, setNotes: setNotes })
     ), /*#__PURE__*/
@@ -5214,6 +5218,9 @@ function AdultFlow({ patientId: initPid, assessmentId, mode, draft }) {
     const conds = L_ITEMS.filter((l) => allL.includes(l.id)).map((l) => l.label);
     return { lItemCount: cnt, qualifies: q_, mainConditions: conds };
   }, [allL]);
+  // v77: 管理方針の文を、当てはまったL項目から自動で入れる（新しい評価だけ。過去の記録・閲覧モードでは変えない）
+  const autoNotes = useMemo(() => autoNotesAdult(allL), [allL]);
+  const markAutoNotes = useAutoNotes(autoNotes, notes, setNotes, !ro && !isLoaded, prefillRef);
 
   // 各セッターは閲覧モード（ro）ではガードして変更を無効化する
   // v70: 過去の記録の「最後に測った値」（タップで判定を付けるとき、過去の検査値で該当するかを見る）
@@ -5519,9 +5526,10 @@ function AdultFlow({ patientId: initPid, assessmentId, mode, draft }) {
 
     })(), /*#__PURE__*/
     React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-5" }, /*#__PURE__*/
-    React.createElement("h3", { className: "font-semibold text-gray-800 mb-2" }, "\uD83D\uDCDD \u30E1\u30E2\u30FB\u7BA1\u7406\u65B9\u91DD"), /*#__PURE__*/
-    React.createElement("p", { className: "text-xs text-gray-400 mb-2" }, "\u8A3A\u65AD\u7D50\u679C\u3092\u8E0F\u307E\u3048\u305F\u7BA1\u7406\u65B9\u91DD\u3092\u8A18\u5165\uFF08\u7BA1\u7406\u8A08\u753B\u66F8\u306B\u5370\u5B57\u3055\u308C\u307E\u3059\uFF09"), /*#__PURE__*/
-    React.createElement("textarea", { value: notes, onChange: (e) => setNotesRO(e.target.value), disabled: ro, rows: 3, placeholder: "\u6240\u898B\u30FB\u7BA1\u7406\u65B9\u91DD\u306A\u3069", onFocus: focusIntoView,
+    React.createElement("h3", { className: "font-semibold text-gray-800 mb-2" }, "\uD83D\uDCDD \u30E1\u30E2\u30FB\u7BA1\u7406\u65B9\u91DD"),
+    ro ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mb-2" }, "\u7BA1\u7406\u8A08\u753B\u66F8\u3068\u304A\u77E5\u3089\u305B\u306B\u5370\u5B57\u3055\u308C\u307E\u3059") : /*#__PURE__*/
+    React.createElement(AutoNotesBar, { notes: notes, autoText: autoNotes, setNotes: setNotes, onReplaced: markAutoNotes }), /*#__PURE__*/
+    React.createElement("textarea", { value: notes, onChange: (e) => setNotesRO(e.target.value), disabled: ro, rows: 5, placeholder: "\u6240\u898B\u30FB\u7BA1\u7406\u65B9\u91DD\u306A\u3069", onFocus: focusIntoView,
       className: `w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none ${ro ? 'opacity-60 bg-gray-100' : ''}` }),
     !ro && /*#__PURE__*/React.createElement(NoteTemplates, { kind: "adult", notes: notes, setNotes: setNotes })
     ), /*#__PURE__*/
@@ -6076,19 +6084,84 @@ function PrintAdult({ a, patientName, prev }) {
 // 管理方針・目標の定型文（メモ欄にワンタップ挿入）
 const NOTE_TEMPLATES = {
   pediatric: [
-  { label: '🏃 訓練開始', text: '口腔機能発達不全症と診断。ご家庭でのトレーニングを処方し、3か月間実施のうえ再評価を行う。保護者へ指導内容を説明した。' },
-  { label: '🎯 機能獲得', text: '正常な口腔機能の獲得を目標に、口腔周囲筋の訓練と生活習慣（食事姿勢・鼻呼吸）の指導を行う。' },
-  { label: '👄 口唇閉鎖力', text: '口唇閉鎖力の向上を目標に、りっぷるとれーなー等による口唇訓練を毎日実施するよう指導した。' },
-  { label: '👀 経過観察', text: '機能の発達を経過観察とし、約3か月後に再評価を行う。' },
-  { label: '🥄 離乳前', text: '離乳前のため練習は処方せず、食べ方と姿勢（手づかみ食べ・足の裏が台につくいす）を保護者に指導した。約3か月後に再評価を行う。' } // v77
+  { key: 'start', label: '🏃 訓練開始', text: '口腔機能発達不全症と診断。ご家庭でのトレーニングを処方し、3か月間実施のうえ再評価を行う。保護者へ指導内容を説明した。' },
+  { key: 'goal', label: '🎯 機能獲得', text: '正常な口腔機能の獲得を目標に、口腔周囲筋の訓練と生活習慣（食事姿勢・鼻呼吸）の指導を行う。' },
+  { key: 'lip', label: '👄 口唇閉鎖力', text: '口唇閉鎖力の向上を目標に、りっぷるとれーなー等による口唇訓練を毎日実施するよう指導した。' },
+  { key: 'watch', label: '👀 経過観察', text: '機能の発達を経過観察とし、約3か月後に再評価を行う。' },
+  { key: 'pre', label: '🥄 離乳前', text: '離乳前のため練習は処方せず、食べ方と姿勢（手づかみ食べ・足の裏が台につくいす）を保護者に指導した。約3か月後に再評価を行う。' } // v77
   ],
   adult: [
-  { label: '🏃 訓練開始', text: '口腔機能低下症と診断。該当項目に対応するお口の機能トレーニングを処方し、3か月間実施のうえ再評価を行う。' },
-  { label: '🎯 機能維持', text: '現在の口腔機能の維持を目標に、お口の体操の継続と定期的な経過観察を行う。' },
-  { label: '💧 衛生・乾燥', text: '口腔衛生状態・口腔乾燥の改善を優先し、清掃指導と保湿ケア、だ液腺マッサージを指導した。' },
-  { label: '👀 経過観察', text: '明らかな機能低下は認めず。経過観察とし、約3か月後に再評価を行う。' }]
+  { key: 'start', label: '🏃 訓練開始', text: '口腔機能低下症と診断。該当項目に対応するお口の機能トレーニングを処方し、3か月間実施のうえ再評価を行う。' },
+  { key: 'keep', label: '🎯 機能維持', text: '現在の口腔機能の維持を目標に、お口の体操の継続と定期的な経過観察を行う。' },
+  { key: 'hygiene', label: '💧 衛生・乾燥', text: '口腔衛生状態・口腔乾燥の改善を優先し、清掃指導と保湿ケア、唾液腺マッサージを指導した。' },
+  { key: 'watch', label: '👀 経過観察', text: '明らかな機能低下は認めず。経過観察とし、約3か月後に再評価を行う。' }]
 
 };
+const noteTpl = (kind, key) => (NOTE_TEMPLATES[kind].find((t) => t.key === key) || {}).text || '';
+// v77: 管理方針・目標の文を、当てはまった項目から組み立てる（院長 11/7「チェックで引っかかった項目に最も適した文章に自動入力」）。
+//   言い回しは上の定型文のまま。当てはまった項目の名前と、項目に合わせた1文（口唇・衛生乾燥・耳鼻科・言語聴覚士）だけを足す
+function autoNotesAdult(checkedL) {
+  const ids = L_ITEMS.map((l) => l.id).filter((id) => (checkedL || []).includes(id));
+  if (!ids.length) return noteTpl('adult', 'watch');
+  const names = L_ITEMS.filter((l) => ids.includes(l.id)).map((l) => l.label).join('・');
+  const out = ids.length >= 3 ?
+  [noteTpl('adult', 'start').replace('口腔機能低下症と診断。', `口腔機能低下症と診断（${names}）。`)] :
+  [`口腔機能低下症の診断基準（3項目以上）には該当しないが、${names}を認める。`, noteTpl('adult', 'keep')];
+  const l1 = ids.includes('L-1'),l2 = ids.includes('L-2');
+  if (l1 && l2) out.push(noteTpl('adult', 'hygiene'));else
+  if (l1) out.push('口腔衛生状態の改善を優先し、清掃指導（舌の清掃を含む）を行った。');else
+  if (l2) out.push('口腔乾燥の改善を優先し、保湿ケアと唾液腺マッサージを指導した。');
+  return out.join('\n');
+}
+function autoNotesPediatric(pre, qualifies, patterns, checkedIds) {
+  const ids = checkedIds || [];
+  if (pre) {
+    if (!ids.length) return noteTpl('pediatric', 'watch');
+    return (qualifies ? '口腔機能発達不全症と診断（離乳完了前）。' : '口腔機能発達不全症の診断基準には該当しないが、気になる項目を認める。') + '\n' + noteTpl('pediatric', 'pre');
+  }
+  const pats = (patterns || []).map((p) => PATTERNS[p.patternId]).filter(Boolean);
+  const others = C_ITEMS_POST.filter((it) => ids.includes(it.id) && !(it.patterns || []).length && !/^上記以外/.test(it.label)).map((it) => it.label);
+  const names = pats.map((p) => p.name).concat(others).join('、'); // 型の名前に「・」が入る（いびき・扁桃肥大）ので区切りは「、」
+  if (!names) return noteTpl('pediatric', 'watch');
+  const tr = prescribeTrainings(patterns || []);
+  const out = [];
+  if (qualifies) {
+    out.push(tr.length ? noteTpl('pediatric', 'start').replace('口腔機能発達不全症と診断。', `口腔機能発達不全症と診断（${names}）。`) :
+    `口腔機能発達不全症と診断（${names}）。約3か月後に再評価を行う。`);
+    if (tr.length) out.push(noteTpl('pediatric', 'goal'));
+  } else {
+    out.push(`口腔機能発達不全症の診断基準には該当しないが、${names}を認める。` + (tr.length ? 'ご家庭でのトレーニングを指導し、' : '') + noteTpl('pediatric', 'watch'));
+  }
+  if (tr.some((t) => t.key === 'lip')) out.push(noteTpl('pediatric', 'lip'));
+  if (pats.some((p) => p.id === 'sleepApnea')) out.push('いびき・扁桃肥大について、耳鼻咽喉科への紹介を検討する。');
+  if (pats.some((p) => p.id === 'articulation')) out.push('構音について、言語聴覚士との連携を検討する。');
+  return out.join('\n');
+}
+// メモ欄の自動の文：新しい評価で、メモ欄が空か「前に自動で入れた文のまま」のときだけ、当てはまった項目に合わせて入れかえる。
+//   手で書きかえたら、そのあとは自動では変えない（入れかえボタンでだけ）。過去の記録を開いたとき・閲覧モードでは何もしない
+//   prefillRef＝自動で入れた文は「入力」に数えない（数えると、何も入れていない新しい評価にも「続きから再開」の控えが残る）
+function useAutoNotes(autoText, notes, setNotes, enabled, prefillRef) {
+  const lastRef = useRef(null);
+  useEffect(() => {
+    if (enabled && (notes === '' || notes === lastRef.current) && notes !== autoText) {
+      if (prefillRef) prefillRef.current = true;
+      setNotes(autoText);
+    }
+    lastRef.current = autoText;
+  }, [autoText, enabled]);
+  return () => {lastRef.current = autoText;}; // 入れかえボタンで入れたあとも「自動の文」として扱う
+}
+function AutoNotesBar({ notes, autoText, setNotes, onReplaced }) {
+  const same = notes === autoText;
+  return (/*#__PURE__*/
+    React.createElement("div", { className: "flex items-start gap-2 mb-2" }, /*#__PURE__*/
+    React.createElement("p", { className: "text-xs text-gray-500 flex-1 leading-relaxed" }, "\u5F53\u3066\u306F\u307E\u3063\u305F\u9805\u76EE\u306B\u5408\u308F\u305B\u305F\u6587\u304C\u81EA\u52D5\u3067\u5165\u308A\u307E\u3059\uFF08\u9805\u76EE\u3092\u5909\u3048\u308B\u3068\u6587\u3082\u5909\u308F\u308A\u307E\u3059\u3002\u66F8\u304D\u304B\u3048\u305F\u3089\u3001\u305D\u306E\u3042\u3068\u306F\u81EA\u52D5\u3067\u306F\u5909\u308F\u308A\u307E\u305B\u3093\uFF09\u3002\u7BA1\u7406\u8A08\u753B\u66F8\u3068\u304A\u77E5\u3089\u305B\u306B\u5370\u5B57\u3055\u308C\u307E\u3059\u3002"), /*#__PURE__*/
+    React.createElement("button", { type: "button", disabled: same,
+      onClick: () => {if (notes && !window.confirm('今のメモを、当てはまった項目から作った文に入れかえます。よろしいですか？')) return;setNotes(autoText);if (onReplaced) onReplaced();},
+      className: `flex-shrink-0 text-xs font-semibold px-3 py-1.5 rounded-lg border ${same ? 'border-gray-200 text-gray-300' : 'border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100'}` }, "\u21BA \u9805\u76EE\u306B\u5408\u308F\u305B\u305F\u6587\u306B\u5165\u308C\u304B\u3048\u308B")
+    ));
+
+}
 // メモ欄の下に置く定型文リスト（本文全文をそのまま選択肢として表示。タップで追記）
 function NoteTemplates({ kind, notes, setNotes }) {
   return (/*#__PURE__*/
@@ -6504,6 +6577,17 @@ function runSelfTests() {
   t('v77: 3歳未満の旧記録＝測定値だけの型は外し、残りを主に', effectivePedPatterns(old2, 2).map((p) => p.patternId + ':' + p.type), ['mastication:primary']);
   t('v77: 3歳以上の記録は型をそのまま', effectivePedPatterns(old2, 3).length, 3);
   t('v77: 型の無い古い形でも落ちない', effectivePedPatterns({}, 2), []);
+  // v77: 管理方針の文を、当てはまった項目から自動で（院長 11/7）
+  t('v77: 管理方針（大人）当てはまり0＝経過観察の定型文', autoNotesAdult([]), '明らかな機能低下は認めず。経過観察とし、約3か月後に再評価を行う。');
+  t('v77: 管理方針（大人）3項目以上＝診断名と項目名＋訓練開始の文', autoNotesAdult(['L-7', 'L-5', 'L-6']).split('\n')[0], '口腔機能低下症と診断（低舌圧・咀嚼機能低下・嚥下機能低下）。該当項目に対応するお口の機能トレーニングを処方し、3か月間実施のうえ再評価を行う。');
+  t('v77: 管理方針（大人）1〜2項目＝基準に届かない文＋機能維持', autoNotesAdult(['L-1']).split('\n'), ['口腔機能低下症の診断基準（3項目以上）には該当しないが、口腔衛生状態不良を認める。', '現在の口腔機能の維持を目標に、お口の体操の継続と定期的な経過観察を行う。', '口腔衛生状態の改善を優先し、清掃指導（舌の清掃を含む）を行った。']);
+  tOk('v77: 管理方針（大人）汚れと乾き＝衛生・乾燥の定型文', autoNotesAdult(['L-1', 'L-2', 'L-5']).includes('口腔衛生状態・口腔乾燥の改善を優先し、清掃指導と保湿ケア、唾液腺マッサージを指導した。'));
+  t('v77: 管理方針（子ども）当てはまり0＝経過観察', autoNotesPediatric(false, false, [], []), '機能の発達を経過観察とし、約3か月後に再評価を行う。');
+  {const dx = kidsDx(C_ITEMS_POST, ['C-5', 'C-10']);const s = autoNotesPediatric(false, true, dx, ['C-5', 'C-10']).split('\n');
+    t('v77: 管理方針（子ども）診断＋型の名前＋機能獲得＋口唇閉鎖力', s, ['口腔機能発達不全症と診断（咀嚼機能の異常、口唇閉鎖不全（お口ポカン））。ご家庭でのトレーニングを処方し、3か月間実施のうえ再評価を行う。保護者へ指導内容を説明した。', '正常な口腔機能の獲得を目標に、口腔周囲筋の訓練と生活習慣（食事姿勢・鼻呼吸）の指導を行う。', '口唇閉鎖力の向上を目標に、りっぷるとれーなー等による口唇訓練を毎日実施するよう指導した。']);}
+  tOk('v77: 管理方針（子ども）いびき→耳鼻科・発音→言語聴覚士', (() => {const s = autoNotesPediatric(false, true, kidsDx(C_ITEMS_POST, ['C-16', 'C-9', 'C-5']), ['C-16', 'C-9', 'C-5']);return s.includes('耳鼻咽喉科への紹介を検討する') && s.includes('言語聴覚士との連携を検討する');})());
+  tOk('v77: 管理方針（子ども）離乳前＝離乳前の定型文', autoNotesPediatric(true, true, [], ['C-3', 'C-5']).endsWith('離乳前のため練習は処方せず、食べ方と姿勢（手づかみ食べ・足の裏が台につくいす）を保護者に指導した。約3か月後に再評価を行う。'));
+  tOk('v77: 管理方針（子ども）型に入らない項目だけ＝項目名を書き、処方とは書かない', (() => {const s = autoNotesPediatric(false, true, [], ['C-1', 'C-3']);return s.includes('歯の萌出に遅れがある') && !s.includes('処方');})());
 
   // --- 小児のスコアリング ---
   const eat2 = C_ITEMS_POST.filter((x) => x.fn === '食べる').slice(0, 2).map((x) => x.id);
