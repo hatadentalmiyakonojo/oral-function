@@ -1430,7 +1430,7 @@ function save(key, val, notify) {
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
 // v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
-const APP_VERSION = '76'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '77'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -2184,11 +2184,12 @@ const LIP_FORCE_NORMS = {
 };
 const LIP_FORCE_AGES = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 18];
 // 患者の年齢・性別から該当する標準値（平均値・-1SD）を返す。掲載のない年齢は直近下位の年齢を採用
+//   v77: 3歳未満は表が無いので null（比べない・練習の選び方にも入れない。院長 11/7。以前は3歳の値と比べて「弱い」が出やすかった）
 function lipForceNorm(years, gender) {
   if (years == null || isNaN(years)) return null;
+  if (years < 3) return null;
   let a = LIP_FORCE_AGES[0];
   for (const ag of LIP_FORCE_AGES) {if (ag <= years) a = ag;}
-  if (years < 3) a = 3;
   const row = LIP_FORCE_NORMS[a];
   const g = gender === 'female' ? 'f' : 'm';
   return { age: a, mean: row[g][0], minus1sd: row[g][1], gender: g };
@@ -2200,12 +2201,13 @@ const PED_TONGUE_NORMS = {
   11: { mean: 37.52, cutoff: 31 }, 12: { mean: 37.48, cutoff: 31 }
 };
 const PED_TONGUE_AGES = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-// 小児：年齢から舌圧の平均値・cut-off値を返す（掲載のない年齢は直近下位。3歳未満は3歳、12歳超は12歳を採用）
+// 小児：年齢から舌圧の平均値・cut-off値を返す（掲載のない年齢は直近下位。12歳超は12歳を採用）
+//   v77: 3歳未満は表が無いので null（比べない）
 function pedTongueNorm(years) {
   if (years == null || isNaN(years)) return null;
+  if (years < 3) return null;
   let a = PED_TONGUE_AGES[0];
   for (const ag of PED_TONGUE_AGES) {if (ag <= years) a = ag;}
-  if (years < 3) a = 3;
   return { age: a, mean: PED_TONGUE_NORMS[a].mean, cutoff: PED_TONGUE_NORMS[a].cutoff };
 }
 // ★L-5（低舌圧）の判定・算定に使う唯一の基準値。口腔機能低下症の診断基準＝最大舌圧 30kPa未満。
@@ -2403,82 +2405,146 @@ function TrendCard({ title, unit, series, color = '#2563eb' }) {
     ));
 
 }
-// オリジナル訓練カード（印刷用・GC画像不使用）
+// ═══════════════════════════════════════════════
+// お口の練習の文（v77・院長 2026-11-07「おすすめどおり進めて」）
+//   ★チェアサイド説明の練習の段と同じ文：大人 A・B・C・E＝teika.html、D・F・G・H と子どもの練習1〜5＝mft.html、
+//     食べるときの姿勢・くせ＝hattatsu.html、離乳前の食べ方＝akachan.html（手づかみ食べの段）。
+//     どちらかを直したら両方を直し、`python3 tools/check_shido_sync.py` で照らし合わせる。
+//   文のもと＝10/27 の裏取り（_handoff/材料_MFT/裏取り_結果.json）。根拠が見つからなかった効果の文
+//   （ほうれい線・舌や頬を噛みにくくなる・誤嚥を防ぐ）と「舌に200〜300gの圧」は載せない。
+//   記号 A〜H と、結果→練習の組み合わせ（L_TO_TRAINING）は「口腔機能実地指導提供文書」（監修：松島良次先生）のまま。
+// ═══════════════════════════════════════════════
+const TRAIN_STOP_ADULT = '痛みが出たり、むせたりしたら、やめてお知らせください。'; // teika.html の TRAIN_NOTE と同じ
+const TRAIN_STOP_KIDS = '痛みが出たり、口が開きにくくなったりしたら、やめてお知らせください。'; // mft.html・hattatsu.html の TRAIN_NOTE と同じ
+// ふだんのお口の形（mft.html の最初の段「安静時の舌・唇・歯の位置」と同じ）
+const REST_POSTURE = ['唇は軽く閉じる', '舌は上あごにそっとつけ、舌先はスポットへ', '上下の歯は少し離す', '鼻で息をする'];
+// L項目のチェアサイドでの呼び名（teika.html の練習の表の左の札と同じ）。練習カードの「〇〇のための練習」に使う
+const L_CHAIR = { 'L-1': 'お口の汚れ', 'L-2': 'お口の乾き', 'L-3': 'かむ力', 'L-4': '舌と唇の動き', 'L-5': '舌の力', 'L-6': 'かんで混ぜる力', 'L-7': '飲みこむ力' };
+// 練習カード（画面・印刷で共用）。badge＝大人は A〜H、子どもは練習の番号（MFT と同じ）。forLabels＝その人のどの結果のための練習か
 function TrainCardPrint({ t }) {
+  const badge = t.letter || (t.no ? String(t.no) : '');
+  const points = [].concat(t.point || []),notes = [].concat(t.note || []);
   return (/*#__PURE__*/
     React.createElement("div", { className: "avoid-break", style: { border: '1px solid #bfdbfe', borderRadius: '9px', overflow: 'hidden', marginBottom: '6px', breakInside: 'avoid' } }, /*#__PURE__*/
-    React.createElement("div", { style: { background: '#2563eb', color: '#fff', padding: '4px 9px', display: 'flex', alignItems: 'center', gap: '6px' } }, /*#__PURE__*/
-    React.createElement("span", { style: { width: '17px', height: '17px', borderRadius: '50%', background: '#fff', color: '#2563eb', fontSize: '11px', fontWeight: '700', textAlign: 'center', lineHeight: '17px', flexShrink: 0 } }, t.letter), /*#__PURE__*/
+    React.createElement("div", { style: { background: '#2563eb', color: '#fff', padding: '4px 9px', display: 'flex', alignItems: 'center', gap: '6px' } },
+    badge && /*#__PURE__*/React.createElement("span", { style: { width: '17px', height: '17px', borderRadius: '50%', background: '#fff', color: '#2563eb', fontSize: '11px', fontWeight: '700', textAlign: 'center', lineHeight: '17px', flexShrink: 0 } }, badge), /*#__PURE__*/
     React.createElement("span", { style: { fontSize: '12px', fontWeight: '700' } }, t.icon, " ", t.name)
     ), /*#__PURE__*/
-    React.createElement("div", { style: { padding: '5px 9px', background: '#eff6ff' } }, /*#__PURE__*/
-    React.createElement("ol", { style: { fontSize: '10.5px', color: '#1f2937', margin: 0, paddingLeft: '15px' } },
+    React.createElement("div", { style: { padding: '5px 9px', background: '#eff6ff' } },
+    t.forLabels && t.forLabels.length > 0 && /*#__PURE__*/React.createElement("p", { style: { fontSize: '9.5px', color: '#1e3a8a', fontWeight: '700', marginBottom: '2px' } }, t.forLabels.map((x) => `「${x}」`).join(''), "\u306E\u305F\u3081\u306E\u7DF4\u7FD2"), /*#__PURE__*/
+    React.createElement("ol", { style: { fontSize: '10.5px', color: '#1f2937', margin: 0, paddingLeft: '15px', listStyle: 'decimal' } },
     t.steps.map((s, i) => /*#__PURE__*/React.createElement("li", { key: i, style: { marginBottom: '1px', lineHeight: '1.35' } }, s))
+    ),
+    points.map((p, i) => /*#__PURE__*/React.createElement("p", { key: 'p' + i, style: { fontSize: '10px', color: /^✕/.test(p) ? '#b91c1c' : '#1d4ed8', fontWeight: '600', marginTop: i ? '1px' : '3px', lineHeight: '1.35' } }, /^✕/.test(p) ? '' : '💡 ', p)),
+    notes.map((n, i) => /*#__PURE__*/React.createElement("p", { key: 'n' + i, style: { fontSize: '9.5px', color: '#92400e', marginTop: '1px', lineHeight: '1.35' } }, "\u203B ", n))
+    )
+    ));
+
+}
+// 練習カード（画面用＝院内のスタッフが見る）。中身は印刷と同じ
+function TrainCardScreen({ t }) {
+  const badge = t.letter || (t.no ? String(t.no) : '');
+  return (/*#__PURE__*/
+    React.createElement("div", { className: "border border-blue-100 rounded-xl overflow-hidden" }, /*#__PURE__*/
+    React.createElement("div", { className: "bg-blue-600 text-white px-3 py-1.5 flex items-center gap-2" },
+    badge && /*#__PURE__*/React.createElement("span", { className: "w-5 h-5 rounded-full bg-white text-blue-600 text-xs font-bold flex items-center justify-center flex-shrink-0" }, badge), /*#__PURE__*/
+    React.createElement("span", { className: "text-sm font-semibold" }, t.icon, " ", t.name)
     ), /*#__PURE__*/
-    React.createElement("p", { style: { fontSize: '10px', color: '#1d4ed8', fontWeight: '600', marginTop: '3px' } }, "\uD83D\uDCA1 ", t.point), /*#__PURE__*/
-    React.createElement("p", { style: { fontSize: '9px', color: '#6b7280', marginTop: '1px' } }, "\u52B9\u679C\uFF1A", t.effects.join('／'))
+    React.createElement("div", { className: "bg-blue-50/50 px-3 py-2" },
+    t.forLabels && t.forLabels.length > 0 && /*#__PURE__*/React.createElement("p", { className: "text-xs font-semibold text-blue-900 mb-1" }, t.forLabels.map((x) => `「${x}」`).join(''), "\u306E\u305F\u3081\u306E\u7DF4\u7FD2"), /*#__PURE__*/
+    React.createElement("ol", { className: "text-xs text-gray-700 list-decimal list-inside space-y-0.5" }, t.steps.map((s, i) => /*#__PURE__*/React.createElement("li", { key: i }, s))),
+    [].concat(t.point || []).map((p, i) => /*#__PURE__*/React.createElement("p", { key: 'p' + i, className: `text-xs font-medium mt-1 ${/^✕/.test(p) ? 'text-red-700' : 'text-blue-700'}` }, /^✕/.test(p) ? '' : '💡 ', p)),
+    [].concat(t.note || []).map((n, i) => /*#__PURE__*/React.createElement("p", { key: 'n' + i, className: "text-xs text-amber-800 mt-0.5" }, "\u203B ", n))
     )
     ));
 
 }
 const ADULT_TRAININGS = {
   A: { letter: 'A', icon: '💧', name: 'ガラガラうがい',
-    steps: ['上を向いてガラガラうがいを5〜15秒', '水を溜めたまま鼻で呼吸を3回'],
-    point: '歯磨き時に3回',
-    effects: ['のどの筋肉を鍛える', '誤嚥防止', '口呼吸から鼻呼吸へ'] },
-  B: { letter: 'B', icon: '🍶', name: 'ペットボトルを使用したトレーニング',
-    steps: ['空のペットボトルを吸ってへこませる', 'へこませたペットボトルに強く息を吹き込み膨らませる'],
-    point: '吸って吐いてを3回連続で行う（1日3回できると良い）',
-    effects: ['お口周りの筋力と肺活量を増やす', '肺に誤嚥した食物を吐き出す力を蓄える'] },
+    steps: ['上を向いて、ガラガラうがいを5〜15秒。', '水を口にためたまま、鼻で3回息をする。'],
+    point: ['歯みがきのときに3回。'],
+    note: ['食事や水でむせやすい方は、上を向くうがいはせず、空気でブクブクうがいにする。'] },
+  B: { letter: 'B', icon: '🍶', name: 'ペットボトル体操',
+    steps: ['空のペットボトルをくわえ、吸ってへこませる。', 'へこんだボトルに強く息を吹きこんで、ふくらませる。', '吸って吹くを3回続けて1セット。'],
+    point: ['1日3セット。'], note: [] },
   C: { letter: 'C', icon: '👅', name: '舌回し',
-    steps: ['口を閉じた状態で舌を歯に沿わせてゆっくりと10回まわす'],
-    point: '左10回、右10回を1セット、1日3セットを目安に',
-    effects: ['だ液の量が増える', '舌やほっぺたを噛みにくくする', 'ほうれい線が薄くなる'] },
-  D: { letter: 'D', icon: '👄', name: 'お口と舌の強化 〜あいうべ体操〜',
-    steps: ['「あ」大きくお口を開けて', '「い」お口を横に引っ張って', '「う」唇を前に突き出して', '「べ」舌を下方に突き出して'],
-    point: '「あいうべ〜」を1セット、1日30セットを目安に',
-    effects: ['お口周りや舌の筋肉を鍛え、舌やほっぺたを噛みにくくする', '滑舌が良くなり、ほうれい線が薄くなる'] },
-  E: { letter: 'E', icon: '🪥', name: '舌ブラシ清掃＆トレーニング',
-    steps: ['軽い力でゆっくりと前方へ引き出す', '舌に200〜300gの圧をかけて10秒くらい静止'],
-    point: '各2回ずつを目安に',
-    effects: ['舌の清掃と一緒に舌の筋トレができる', '飲み込みがスムーズになる'] },
+    steps: ['口を閉じ、舌先で歯の外側をゆっくり一周する', '左回り10回・右回り10回で1セット。'],
+    point: ['1日3セット。'], note: [] },
+  D: { letter: 'D', icon: '👄', name: 'あいうべ体操',
+    steps: ['「あー」口を大きく開ける。', '「いー」首に筋が出るくらい、口を横に引く。', '「うー」唇を前に突き出す。', '「べー」舌をあごの先へ伸ばす。'],
+    point: ['4つで1回。1日30回（10回ずつ3回に分けてよい）', '声は出さなくてよい'],
+    note: ['あごが痛む・口を開けるとカクカク鳴る・あごが外れたことがある方は、始める前にお知らせください', 'あごが痛む方は「いー」「うー」だけにする'] },
+  E: { letter: 'E', icon: '🪥', name: '舌ブラシと押し上げ',
+    steps: ['舌ブラシを舌の奥から手前へ、力を入れずに動かす（えずくほど奥には入れない）。1日1回まで。', '舌全体で上あごを強く押し上げて、5つ数える。1日30回。'],
+    point: ['✕ 強くこすらない', 'ふつうの歯ブラシではなく、舌ブラシを使う'], note: [] },
   F: { letter: 'F', icon: '🗣️', name: 'パタカラ体操',
-    steps: ['「パ」唇をはじくように', '「タ」舌の先を使って', '「カ」舌の奥を上顎に近づけて', '「ラ」舌を巻くように'],
-    point: '「パタカラ」を10回ずつ連呼、1日3セットを目安に',
-    effects: ['滑舌がよくなる', '食べこぼしや口の中に食べ物が残ることが減る'] },
-  G: { letter: 'G', icon: '🍬', name: 'ガムトレーニング',
-    steps: ['ガムを左右で噛む（噛みにくい方を長めに）', 'ガムを丸め、舌の先で上あごに3秒間押し付けて伸ばす。だ液を3回飲み込む', 'ガムが奥に伸びない人は舌先を前後に5〜10回動かす'],
-    point: '食事はどんなものでも左右で15回ずつ噛んでから飲み込む',
-    effects: ['噛む力が強くなる', '舌や頬を噛みにくくする', '飲み込みがスムーズになる'] },
-  H: { letter: 'H', icon: '🤲', name: 'だ液腺マッサージ',
-    steps: ['耳下腺：上の奥歯と耳の間あたりを数本の指の腹で軽く押し、後ろから前に回す', '顎下腺：下顎の骨の内側を数本の指でつまむように押す', '舌下腺：下顎の内側を親指の腹でゆっくりと軽く押し上げる'],
-    point: '目の前にレモンや梅干しを置いてだ液をため、それからマッサージを行う',
-    effects: ['だ液が出やすくなる', '口腔乾燥が改善し、舌や粘膜の摩擦を減少させる', 'ヒリヒリ感の減少、舌や頬を噛みにくくする'] }
+    steps: ['「パ」唇をしっかり閉じてから。', '「タ」舌の先を上の前歯のつけ根に当てて。', '「カ」舌の奥を軟口蓋に当てる', '「ラ」舌の先を、タより少し奥の歯ぐきに当て、はじくように。'],
+    point: ['1音ずつ10回、大きくはっきり', '1日3回'], note: [] },
+  G: { letter: 'G', icon: '🍬', name: 'ガムでかむ練習', // 1つ目の手順だけ大人向け（かみにくい側を長めに＝監修文書どおり）。2・3つ目は mft.html と同じ
+    steps: ['ガムを右と左の奥歯でかむ。かみにくい側を少し長めにかむ。', 'やわらかくなったら舌で丸め、上の前歯のうしろに押しつけて、上あごに広げる。', 'その舌の位置のまま、つばを3回飲みこむ。'],
+    point: ['かみ終わったガムは飲みこまず、紙に包んで捨てる'],
+    note: ['入れ歯の方や、ぐらぐらする歯・取れやすいつめ物がある方は、始める前にご相談ください。'] },
+  H: { letter: 'H', icon: '🤲', name: '唾液腺マッサージ',
+    steps: ['耳下腺：耳の前・上の奥歯付近に指をそろえ、後ろから前へ円を描く。10回', '顎下腺：あごの骨の内側を、耳の下からあご先へ親指で順に押す。約5か所、各5回', 'あごの真下を、両手の親指で軽く押し上げる（10回）。'],
+    point: ['食事の前に、痛くない強さで', '腫れや痛みがある所は押さない'],
+    note: ['お口の乾きは、飲んでいる薬で起こることもある', 'お薬手帳をお見せください'] }
 };
+// 子どもの練習（no＝mft.html の練習の番号。番号の無いものは発達不全症のページの段・言語聴覚士）
+const KIDS_TRAININGS = {
+  tongue: { key: 'tongue', no: 1, icon: '👅', name: '舌を上げる',
+    steps: ['舌先はスポットへ（上の前歯のつけ根より少し後ろ。前歯にはふれない）', 'ポッピング：口を指1本分あけ、舌全体を上あごに吸着。3つ数えて「ポン」と離す／舌先は丸めない。1日20回', '押し上げ：舌全体で上あごを強く押し上げて、5つ数える。1日30回。'],
+    point: ['強く押すのは練習のときだけ', 'ふだんは力を入れず、舌の先をスポットに、舌全体を上あごにそっとつけておく'],
+    note: ['「ポン」と鳴らない・舌が上がりにくいときは、舌小帯が短いことがあるため歯科で確認'] },
+  lip: { key: 'lip', no: 2, icon: '💪', name: '唇を閉じて、鼻で息（りっぷるとれーなー）',
+    steps: ['奥歯をかみ合わせ、器具を前歯にそわせて、上下の唇ではさむ。', 'リングを前に引き、唇でこらえて3つ数える（小さい子は保護者が引く）', '前・右・左に10回ずつ。1日30回。'],
+    point: ['唇の力がついても、それだけでふだん口を閉じるようになるとは限らない', '口が開いていたら、唇を閉じて鼻で息をするよう声をかけてください'],
+    note: ['鼻がつまって鼻で息ができないときは、お知らせください。', '器具は使う前に水で洗い、ほかの人と使い回しません。ひびや変形が出たら取りかえます。'] },
+  aiube: { key: 'aiube', no: 3, icon: '👄', name: 'あいうべ体操',
+    steps: ADULT_TRAININGS.D.steps, point: ADULT_TRAININGS.D.point, note: ADULT_TRAININGS.D.note },
+  pataka: { key: 'pataka', no: 4, icon: '🗣️', name: 'パタカラ体操',
+    steps: ADULT_TRAININGS.F.steps, point: ADULT_TRAININGS.F.point, note: [] },
+  gum: { key: 'gum', no: 5, icon: '🍬', name: 'ガムでかむ練習',
+    steps: ['ガムを右と左の奥歯で、同じくらいかむ。', 'やわらかくなったら舌で丸め、上の前歯のうしろに押しつけて、上あごに広げる。', 'その舌の位置のまま、つばを3回飲みこむ。'],
+    point: ['子どもは食後に1回5分、1日2回', 'かみ終わったガムは飲みこまず、紙に包んで捨てる'],
+    note: ['入れ歯の方や、ぐらぐらする歯・取れやすいつめ物がある方は、始める前にご相談ください。'] },
+  posture: { key: 'posture', no: null, icon: '🪑', name: '食べるときの姿勢',
+    steps: ['足の裏を、床か足置きの台につける。', '背すじをのばす。', 'お茶や水で流しこまず、飲むのは食後にする。'],
+    point: ['体が安定すると、かむ力が伝わりやすい', 'こぼす・むせるも減りやすい'], note: [] },
+  habit: { key: 'habit', no: null, icon: '✋', name: '指しゃぶりなどのくせ',
+    steps: ['指しゃぶりなどのくせは、叱らずに、気づいたら一緒に手を止める'], point: [], note: [] },
+  speech: { key: 'speech', no: null, icon: '💬', name: '発音（言語聴覚士と相談）',
+    steps: ['どの音をどう練習するかは、言語聴覚士と相談して決める'], point: [], note: [] }
+};
+// 離乳前（別紙1）の子には練習を出さず、食べ方を伝える（akachan.html「6か月ごろから、自分の手で食べる」の段と同じ文）
+const KIDS_PRE_FEEDING = { key: 'preFeeding', no: null, icon: '🥄', name: '食べ方と姿勢',
+  steps: ['握ってはみ出る大きさ・指でつぶせるやわらかさにする', '丸くて硬い物・小さく硬い物（豆・ナッツなど）は与えない', '座れないうちは大人のひざの上。座れたら、足の裏が台につくいすで', '嫌がるときは、口へ運ばない'],
+  point: [], note: [] };
 // L項目 → 対応訓練（指導文書の表のとおり）。L-4はパ・タ・カの結果で振り分け
 const L_TO_TRAINING = {
   'L-1': ['A', 'E'], 'L-2': ['A', 'C', 'H'], 'L-3': ['D', 'G'],
   'L-5': ['C', 'E'], 'L-6': ['D', 'G'], 'L-7': ['C', 'E']
 };
 // 該当L項目（と測定値）から処方訓練を決定。A〜Hの順で重複なく返す
+//   v77: 各練習に forLabels（その人のどの結果のための練習か＝チェアサイドの表の左の札の言葉）を付ける
 function prescribeAdultTrainings(checkedL, m) {
-  const set = new Set();
+  const why = new Map(); // 記号 → その練習につながったL項目
+  const add = (x, lid) => {if (!why.has(x)) why.set(x, []);const a = why.get(x);if (!a.includes(lid)) a.push(lid);};
   for (const lid of checkedL) {
     if (lid === 'L-4') {
-      // パ:B,F / タ:C,F / カ:D,F（6回/秒未満のものだけ。未測定でL-4該当なら全部）
-      const pa = parseFloat(m?.ddk_pa),ta = parseFloat(m?.ddk_ta),ka = parseFloat(m?.ddk_ka);
-      const anyMeasured = !isNaN(pa) || !isNaN(ta) || !isNaN(ka);
-      if (!anyMeasured) {['B', 'C', 'D', 'F'].forEach((x) => set.add(x));} else
-      {
-        if (pa < 6) {set.add('B');set.add('F');}
-        if (ta < 6) {set.add('C');set.add('F');}
-        if (ka < 6) {set.add('D');set.add('F');}
-      }
+      // パ:B,F / タ:C,F / カ:D,F（6回/秒未満の音だけ）。
+      // v77（点検の指摘）：6未満の音が無いとき（L-4 を手で付けた・前回から引き継いだ）は、測っていない音の練習を、
+      //   全部測ってあるなら B・C・D を出す（v76 までは練習が0になり、紙に「動きがゆっくり」だけが残った）。F はいつも
+      const v = { B: parseFloat(m?.ddk_pa), C: parseFloat(m?.ddk_ta), D: parseFloat(m?.ddk_ka) };
+      const low = Object.keys(v).filter((k) => !isNaN(v[k]) && v[k] < 6);
+      const unmeasured = Object.keys(v).filter((k) => isNaN(v[k]));
+      (low.length ? low : unmeasured.length ? unmeasured : ['B', 'C', 'D']).forEach((x) => add(x, lid));
+      add('F', lid);
     } else {
-      (L_TO_TRAINING[lid] || []).forEach((x) => set.add(x));
+      (L_TO_TRAINING[lid] || []).forEach((x) => add(x, lid));
     }
   }
-  return ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].filter((x) => set.has(x)).map((x) => ADULT_TRAININGS[x]);
+  return ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].filter((x) => why.has(x)).
+  map((x) => ({ ...ADULT_TRAININGS[x], forLabels: why.get(x).slice().sort().map((l) => L_CHAIR[l]).filter(Boolean) }));
 }
 
 // v71: 使われていなかった問診表（ADULT_Q_GROUPS）と deriveAutoLItems・NumInput を削除
@@ -2486,69 +2552,81 @@ function prescribeAdultTrainings(checkedL, m) {
 // ═══════════════════════════════════════════════
 // DATA: PATTERNS (診断パターン)
 // ═══════════════════════════════════════════════
+// v77: name＝院内の画面・管理計画書の名前／plain＝お知らせ（保護者）の見出し／chair＝発達不全症のページの練習の表の左の札
+//      trainings＝KIDS_TRAININGS の記号（並びは発達不全症のページの表と同じ）。記録に入るのは id だけなので、名前や文を変えても前の記録は壊れない
+//      （v76 までの cItems は古い番号のままどこからも使われていなかったので消した。型に入るC項目は C_ITEMS の patterns が正本）
 const PATTERNS = {
-  mastication: { id: 'mastication', name: '咀嚼機能の異常',
-    cItems: ['C-1', 'C-2', 'C-3', 'C-4', 'C-5', 'C-6', 'C-8'],
-    desc: '噛む機能が年齢に合わず、丸呑み、ため込み、偏咀嚼などが見られる状態。食事の発達と栄養に影響する。',
+  mastication: { id: 'mastication', name: '咀嚼機能の異常', chair: 'かみ方', plain: 'かみ方（丸のみ・片がみ）',
+    desc: '年齢に合ったかみ方ができず、丸のみ・ため込み・片がみなどがある。',
     causes: ['食欲低下や食形態の不適合（長すぎる咀嚼）', '口唇閉鎖力不足や水分での流し込み習慣（短すぎる咀嚼）', 'う蝕の痛み、歯の生え変わり、歯列異常（偏咀嚼）'],
     guidance: '食事中の姿勢（足の裏が床/足置きにつく）の重要性、水分摂取は食後に、食形態の工夫を保護者に指導します。',
-    trainings: [
-    { name: 'あいうべ体操', desc: '「あ・い・う・べ」と大きく口を動かす。お風呂などで毎日続けると、口やほおの筋肉がしっかり育ちます。', freq: '1日30回（10回×3セット）', icon: '👄' },
-    { name: '咀嚼トレーニングガム', desc: '弾力のある咀嚼訓練用ガムを左右均等に噛む練習。よく噛むくせをつけ、丸呑みや片側だけで噛む偏りを防ぎます。', freq: '食後1日2回、各5分', icon: '🦷' },
-    { name: '食事姿勢の指導', desc: '足の裏が床または足置きにつく姿勢で食事。体が安定すると噛む力が伝わりやすく、こぼしやむせも減ります。', freq: '毎食', icon: '🪑' }]
-  },
-  lipClosure: { id: 'lipClosure', name: '口唇閉鎖不全（おロポカン）',
-    cItems: ['C-9', 'C-10', 'C-11', 'C-14'],
-    desc: '唇を閉じる力が弱く、安静時や睡眠時に口が開いている状態。口呼吸を伴うことが多く、歯並びや感染リスクに影響する。',
+    trainings: ['aiube', 'gum', 'posture'] },
+  lipClosure: { id: 'lipClosure', name: '口唇閉鎖不全（お口ポカン）', chair: '唇', plain: '唇（お口ポカン・口で息）',
+    desc: '唇を閉じる力が弱い、または、ふだんや寝ているときに口が開いている（口で息をしていることが多い）。',
     causes: ['口腔周囲筋の筋力不足、口を閉じる習慣・意識の不足', '鼻閉・アレルギー性鼻炎による鼻呼吸困難', '舌の低位（低位舌）による口唇支持の欠如'],
     guidance: '口唇閉鎖トレーニングを継続的に行い、鼻呼吸の習慣づけを指導します。必要に応じて耳鼻科的評価を検討します。',
-    trainings: [
-    { name: 'あいうべ体操', desc: '特に「べ」で舌を最大限に伸ばす動作を意識する。鏡を見ながら行うと正しく動かせているか確認でき、口を閉じる力が高まります。', freq: '1日30回', icon: '👄' },
-    { name: 'リップルトレーナー（口唇閉鎖力訓練）', desc: 'リップルトレーナーを前歯と口唇の間に装着し、引き出されないよう口唇で抵抗して保持。前方・左右側方に各10回引き出す。遊び感覚で毎日続けると、唇を閉じる力がつき口がポカンと開きにくくなります。', freq: '1日30回（前方・左右各10回）', icon: '💪' }]
-  },
-  swallowing: { id: 'swallowing', name: '嚥下機能の問題',
-    cItems: ['C-7'],
-    desc: '食べ物や飲み物を飲み込む際にむせが生じる状態。誤嚥リスクに注意が必要。',
-    causes: ['嚥下反射の遅延・協調運動の未発達', '食形態・食事姿勢の問題'],
+    trainings: ['aiube', 'lip'] },
+  swallowing: { id: 'swallowing', name: '嚥下の問題（舌の突出）', chair: '飲みこみ', plain: '飲みこみ（舌が前に出る）',
+    desc: '飲みこむとき、舌が前に出る（前歯のあいだに入る・前歯を押す）。',
+    descPre: 'スプーンや食べ物を、舌で押し出す。', // 離乳前（別紙1）の C-8 のとき（歯の無い子に「前歯」と書かない）
+    causes: ['乳児型嚥下の残存（舌突出）', '低位舌・口唇閉鎖不全', '食形態・食事姿勢の問題'],
     guidance: '食事姿勢の改善、食形態の見直しを指導します。必要に応じてST等を紹介します。',
-    trainings: [
-    { name: 'パタカラ体操', desc: '「パ・タ・カ・ラ」を大きくはっきり繰り返す。飲み込みに使う唇・舌・のどの動きをまとめて鍛え、食前に行うとむせ予防になります。', freq: '1日30回、毎食前', icon: '🗣️' }]
-  },
-  tonguePressure: { id: 'tonguePressure', name: '低舌圧',
-    cItems: ['C-17'],
-    desc: '舌を口蓋に押しつける力（舌圧）が低下している状態。咀嚼・嚥下・発音に影響する。',
+    trainings: ['pataka', 'tongue'] },
+  tonguePressure: { id: 'tonguePressure', name: '低舌圧', chair: '舌の力', plain: '舌の力（舌圧が低い）',
+    desc: '舌を上あごに押しつける力（舌圧）が弱い、または舌が上がりにくい。',
     causes: ['舌筋・口腔周囲筋全体の発育不全', '低位舌の習慣'],
     guidance: '舌の筋力トレーニングを継続的に行います。JMS舌圧測定器等で定期的に評価します。',
-    trainings: [
-    { name: '舌圧トレーニング', desc: '舌を口蓋に力いっぱい押しつけ5秒保持。舌全体を上あごにぴたっとつけるのがコツで、続けると噛む・飲み込む・話す力の土台になります。', freq: '1日30回', icon: '💪' },
-    { name: 'ポッピング', desc: '舌を口蓋に吸いつけ、「ポン」と離す動作。大きな音が出るほど舌がよく動いている合図で、遊びながら舌の力を高められます。', freq: '1日20回', icon: '👅' }]
-  },
-  articulation: { id: 'articulation', name: '構音異常',
-    cItems: ['C-13'],
-    desc: '特定の音が正しく発音できない、または発音が不明瞭な状態。',
+    trainings: ['tongue'] },
+  articulation: { id: 'articulation', name: '構音異常', chair: '発音', plain: '発音',
+    desc: '発音がはっきりしない（音が置きかわる・抜ける・ゆがむ）、または舌のひも（舌小帯）が短い。',
     causes: ['舌・口唇の運動協調性の問題', '歯列異常による構音への影響'],
     guidance: '言語聴覚士（ST）への紹介を検討します。',
-    trainings: [
-    { name: '構音訓練（必要に応じて言語聴覚士と連携）', desc: '発音完成期（5歳）以降も置換・省略・歪みが続く場合に、対象音の構音訓練を行う。中枢・舌小帯等の要因があれば専門医に紹介。あせらず一つずつ正しい音を覚えていくことが、はっきりした発音につながります。', freq: '評価に応じて', icon: '🗣️' },
-    { name: 'パ・タ・カ・ラの発音練習', desc: 'パ・タ・カ・ラを大きくはっきり発音する遊びを取り入れる。口や舌をしっかり動かす練習になり、楽しみながら続けると発音が明瞭になります。', freq: '1日数回', icon: '👅' }]
-  },
-  oralHabit: { id: 'oralHabit', name: '口腔習癖',
-    cItems: ['C-15'],
-    desc: '指しゃぶり・咬唇癖などの口腔習癖が、口腔発達や咬合に悪影響を及ぼしている状態。',
+    trainings: ['pataka', 'speech'] },
+  oralHabit: { id: 'oralHabit', name: '口腔習癖', chair: 'くせ', plain: 'くせ（指しゃぶりなど）',
+    desc: '指しゃぶり・唇をかむ・舌を出すなどのくせがある、またはくせが歯並びにあらわれている。',
     causes: ['習慣化した口腔習癖（無意識行動）'],
     guidance: '保護者への習癖の認識と除去法の指導を行います。',
-    trainings: [
-    { name: '習癖認識プログラム', desc: '習癖が起きた際に自覚し、代替行動をとる習慣づけ。叱るのではなく気づいたら一緒に手を止める声かけを続けると、無理なく癖が減っていきます。', freq: '日常的に意識する', icon: '🧠' }]
-  },
-  sleepApnea: { id: 'sleepApnea', name: '睡眠時無呼吸・口呼吸',
-    cItems: ['C-12', 'C-16'],
-    desc: '睡眠時のいびきや無呼吸が見られる状態。成長・発達への影響に注意が必要。',
+    trainings: ['habit'] },
+  sleepApnea: { id: 'sleepApnea', name: 'いびき・扁桃肥大', chair: 'いびき', plain: 'いびき（扁桃が大きい）',
+    desc: '寝ているときのいびき、またはのどの扁桃が大きい。大きないびき・寝ているときに息が止まる様子があれば耳鼻科へ（寝ている様子のスマホ動画が役立ちます）。',
     causes: ['扁桃肥大・アデノイド肥大', '口腔・咽頭周囲筋の筋力低下'],
     guidance: '耳鼻咽喉科への紹介を検討します。',
-    trainings: [
-    { name: 'あいうべ体操', desc: '口蓋垂・咽頭周囲の筋肉を鍛える。のど周りの筋肉が引き締まると気道が確保されやすく、いびきや口呼吸の改善が期待できます。', freq: '1日30回', icon: '👄' }]
-  }
+    trainings: ['aiube'] }
 };
+// v77（点検の指摘）：3歳未満は比べる表が無いので、v76 までに保存された「測定値だけで付いた型」
+//   （matched が「口唇閉鎖力 -1SD以下」「低舌圧」だけ）を、お知らせ・管理計画書・記録一覧では外す。保存してある記録は変えない
+const PED_MEAS_MATCH = ['口唇閉鎖力 -1SD以下', '低舌圧'];
+function effectivePedPatterns(a, ageYears) {
+  const pats = a && a.diagnosis && Array.isArray(a.diagnosis.matchedPatterns) ? a.diagnosis.matchedPatterns : [];
+  if (ageYears == null || isNaN(ageYears) || ageYears >= 3) return pats;
+  const out = [];
+  for (const p of pats) {
+    if (!p || !Array.isArray(p.matched)) {if (p) out.push(p);continue;}
+    const m = p.matched.filter((x) => !PED_MEAS_MATCH.includes(x));
+    if (m.length) out.push({ ...p, matched: m });
+  }
+  if (out.length && !out.some((p) => p.type === 'primary')) {
+    const max = Math.max(...out.map((p) => (p.matched || []).length));
+    const k = out.findIndex((p) => (p.matched || []).length === max);
+    out[k] = { ...out[k], type: 'primary' };
+  }
+  return out;
+}
+// お知らせで、型に入らない項目（歯の生え方・むし歯 など）を書くときの言葉＝発達不全症のページのチェック表と同じ言葉（別紙2）
+const C_PLAIN_POST = { 'C-1': '歯の生え方が遅い', 'C-2': '歯並び・かみ合わせ', 'C-3': 'むし歯でかめない', 'C-4': '強くかめない', 'C-5': 'かむ回数が多い・少ない', 'C-6': '片がみ',
+  'C-7': '飲みこむとき舌が前に', 'C-8': '食べる量にむら', 'C-9': '発音がはっきりしない', 'C-10': '唇が閉じない', 'C-11': '指しゃぶりなどのくせ', 'C-12': '舌のひもが短い',
+  'C-13': 'やせ・肥満', 'C-14': '口で息をする', 'C-15': '扁桃が大きい', 'C-16': 'いびき', 'C-17': '舌の力が弱い' };
+// 練習カードの「〇〇のための練習」に出す言葉（発達不全症のページの表の左の札）。唇の型は「口で息」（C-14）だけなら「口で息」
+function patternChairLabels(patternId, matched) {
+  const pat = PATTERNS[patternId];if (!pat) return [];
+  if (patternId === 'lipClosure') {
+    const m = matched || [],out = [];
+    if (m.some((x) => x !== 'C-14')) out.push('唇');
+    if (m.includes('C-14')) out.push('口で息');
+    return out.length ? out : [pat.chair];
+  }
+  return [pat.chair];
+}
 
 // 算定判定（JADS令和6年）：「食べる」「話す」機能のC項目で2項目以上該当、かつ中核群（core）を1つ以上含む
 //   items=有効なチェックリスト（別紙1 or 別紙2）, checked=チェック済みC-id配列
@@ -2596,28 +2674,37 @@ function computePediatricDiagnosis(checkedItems, lipLow, tongueLow) {
   return results;
 }
 
-// トレーニング処方の絞り込み：主診→副診（該当数の多い順）に候補を集め、優先度順に最大 MAX_TRAININGS 件
+// トレーニング処方の絞り込み：主診→副診（該当数の多い順）に候補を集め、優先度順に練習を最大 MAX_TRAININGS 件（助言は枠の外）
 //   優先度：数値が大きいほど後回し（既定1）。枠が競合したとき優先度の低いものから押し出される
 const MAX_TRAININGS = 4;
 const TRAINING_PRIORITY = {
-  '咀嚼トレーニングガム': 2 // 優先度低：ポッピング等と競合したらそちらを採用
+  gum: 2 // 優先度低：舌を上げる等と競合したらそちらを採用
 };
-function prescribeTrainings(matchedPatterns) {
+// v77: 練習は記号（KIDS_TRAININGS のキー）で重なりを消す（v76 までは名前で消していたので、名前の違う同じパタカラが2枚出た）。
+//      opts.pre＝離乳前（別紙1）は練習を出さない（食べ方は KIDS_PRE_FEEDING）。各練習に forLabels（どの結果のための練習か）を付ける
+function prescribeTrainings(matchedPatterns, opts) {
+  if (opts && opts.pre) return [];
   const ordered = [...(matchedPatterns || [])].sort((a, b) => {
     if (a.type !== b.type) return a.type === 'primary' ? -1 : 1;
     return (b.matched?.length || 0) - (a.matched?.length || 0);
   });
   // 主診→副診の順で候補を重複なく収集（orderは収集順＝パターンの重要度順）
-  const seen = new Set();const cands = [];
-  for (const { patternId } of ordered) {
+  const seen = new Map();const cands = [];
+  for (const { patternId, matched } of ordered) {
     const pat = PATTERNS[patternId];if (!pat) continue;
-    for (const t of pat.trainings) {
-      if (!seen.has(t.name)) {seen.add(t.name);cands.push({ t, order: cands.length, prio: TRAINING_PRIORITY[t.name] || 1 });}
+    for (const k of pat.trainings) {
+      if (!KIDS_TRAININGS[k]) continue;
+      if (!seen.has(k)) {const c = { t: KIDS_TRAININGS[k], order: cands.length, prio: TRAINING_PRIORITY[k] || 1, labels: [] };seen.set(k, c);cands.push(c);}
+      const c = seen.get(k);
+      patternChairLabels(patternId, matched).forEach((l) => {if (!c.labels.includes(l)) c.labels.push(l);});
     }
   }
-  // 優先度（小さい順）→ 収集順 で並べ、上位 MAX_TRAININGS 件を採用。表示は元の収集順を保つ
-  const picked = [...cands].sort((a, b) => a.prio - b.prio || a.order - b.order).slice(0, MAX_TRAININGS);
-  return picked.sort((a, b) => a.order - b.order).map((x) => x.t);
+  // v77（点検の指摘）：番号の無い助言（食べるときの姿勢・くせ・言語聴覚士）は「練習の4つの枠」に数えない
+  //   （v76 までは助言が枠を使い、低舌圧なのに舌の練習が落ちることがあった）。
+  //   練習は 優先度（小さい順）→ 収集順 で上位 MAX_TRAININGS 件、並びは番号順（チェアサイドの練習1〜5と同じ）。助言はそのあとに収集順
+  const ex = cands.filter((c) => c.t.no != null),adv = cands.filter((c) => c.t.no == null);
+  const picked = [...ex].sort((a, b) => a.prio - b.prio || a.order - b.order).slice(0, MAX_TRAININGS).sort((a, b) => a.t.no - b.t.no);
+  return picked.concat(adv).map((x) => ({ ...x.t, forLabels: x.labels }));
 }
 
 
@@ -4402,7 +4489,7 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
   React.createElement("div", { className: "flex items-center justify-between mb-1" }, /*#__PURE__*/
   React.createElement("label", { className: "text-sm font-medium text-gray-700" }, "\uD83D\uDD2C \u53E3\u5507\u9589\u9396\u529B\u691C\u67FB\uFF08\u308A\u3063\u3077\u308B\u304F\u3093\u30FB3\u56DE\u6E2C\u5B9A\uFF09")
   ), /*#__PURE__*/
-  React.createElement("p", { className: "text-xs text-gray-400" }, lipNorm ? `${lipNorm.age}歳${lipNorm.gender === 'f' ? '女' : '男'} 平均${lipNorm.mean}・-1SD ${lipNorm.minus1sd}N` : 'りっぷるくん', prevPed && prevPed.lipClosureForce ? `／前回 ${prevPed.lipClosureForce}N` : ''), /*#__PURE__*/
+  React.createElement("p", { className: "text-xs text-gray-400" }, lipNorm ? `${lipNorm.age}歳${lipNorm.gender === 'f' ? '女' : '男'} 平均${lipNorm.mean}・-1SD ${lipNorm.minus1sd}N` : age && age.years < 3 ? '3歳未満は比べる表がありません（記録のみ）' : 'りっぷるくん', prevPed && prevPed.lipClosureForce ? `／前回 ${prevPed.lipClosureForce}N` : ''), /*#__PURE__*/
   React.createElement("p", { className: "text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2" }, "\uD83D\uDCCB \u6A5F\u5668\u3092\u6C34\u5E73\u306B\u5F15\u3063\u5F35\u308A\u3001\u629C\u3051\u305F\u77AC\u9593\u306E\u6700\u5927\u5024"), /*#__PURE__*/
   React.createElement(TestIntervalWarn, { warn: warnLip }), /*#__PURE__*/
   React.createElement("div", { className: "grid grid-cols-3 gap-2" },
@@ -4410,7 +4497,7 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
   React.createElement(SelectNum, { key: i, label: `${i + 1}回目`, unit: "N", specKey: "lipForce", value: lip3[i], onChange: (v) => setLip(i, v), disabled: ro, free: true, measured: lipMeasured })
   )
   ), /*#__PURE__*/
-  React.createElement("div", { className: `mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce === '' ? 'bg-gray-50 text-gray-500' : lipGrade && lipGrade.key === 'low' ? 'bg-red-50 text-red-700' : lipGrade && lipGrade.key === 'mid' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}` }, "\u5E73\u5747\uFF08\u6E2C\u5B9A\u5024\uFF09\uFF1A", /*#__PURE__*/
+  React.createElement("div", { className: `mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${lipForce === '' || !lipGrade ? 'bg-gray-50 text-gray-500' : lipGrade.key === 'low' ? 'bg-red-50 text-red-700' : lipGrade.key === 'mid' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}` }, "\u5E73\u5747\uFF08\u6E2C\u5B9A\u5024\uFF09\uFF1A", /*#__PURE__*/
   React.createElement("span", { className: "font-bold text-base" }, lipForce !== '' ? lipForce : '—'), " N", lip3nums.length > 0 && lip3nums.length < 3 ? `（${lip3nums.length}回入力）` : '', !lipMeasured && /*#__PURE__*/React.createElement("span", { className: "ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5" }, lipForce === '' ? '未検査' : '未検査（初期値のまま・保存されません）'),
   lipGrade && lipGrade.key === 'low' && /*#__PURE__*/React.createElement("span", { className: "ml-2 text-xs" }, "\u26A0 -1SD\u4EE5\u4E0B\uFF08\u2266", lipNorm.minus1sd, "N\uFF09\u2192 \u53E3\u5507\u9589\u9396\u529B\u4E0D\u8DB3"),
   lipGrade && lipGrade.key === 'mid' && /*#__PURE__*/React.createElement("span", { className: "ml-2 text-xs" }, "\u3084\u3084\u5F31\u3081\uFF08\u5E73\u5747", lipNorm.mean, "N\u3088\u308A\u4F4E\u3081\u30FB-1SD\u306F\u8D85\u3048\u3066\u3044\u307E\u3059\uFF09"),
@@ -4421,7 +4508,7 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
   const renderTongueBlock = () => /*#__PURE__*/
   React.createElement("div", { className: "px-5 pb-4 pt-1 bg-blue-50/30" }, /*#__PURE__*/
   React.createElement("label", { className: "text-sm font-medium text-gray-700" }, "\uD83D\uDD2C \u820C\u5727\u691C\u67FB\uFF08JMS\u820C\u5727\u8A08\u30FB3\u56DE\u6E2C\u5B9A\uFF09"), /*#__PURE__*/
-  React.createElement("p", { className: "text-xs text-gray-400" }, tongueNorm ? `${tongueNorm.age}歳 平均${tongueNorm.mean}・cut-off ${tongueNorm.cutoff}kPa` : 'JMS舌圧計', prevPed && prevPed.maxTonguePressure ? `／前回 ${prevPed.maxTonguePressure}kPa` : ''), /*#__PURE__*/
+  React.createElement("p", { className: "text-xs text-gray-400" }, tongueNorm ? `${tongueNorm.age}歳 平均${tongueNorm.mean}・cut-off ${tongueNorm.cutoff}kPa` : age && age.years < 3 ? '3歳未満は比べる表がありません（記録のみ）' : 'JMS舌圧計', prevPed && prevPed.maxTonguePressure ? `／前回 ${prevPed.maxTonguePressure}kPa` : ''), /*#__PURE__*/
   React.createElement("p", { className: "text-[11px] text-gray-500 bg-white/70 rounded-lg px-2 py-1 mb-2" }, "\uD83D\uDCCB \u6700\u5927\u306E\u529B\u3067\u7D047\u79D2\u4FDD\u6301\uFF0F\u6700\u5927\u5727\u304C\u6B62\u307E\u3063\u305F\u306E\u3092\u78BA\u8A8D\u3057\u3066\u8A18\u9332\u3002\u7FA9\u6B6F\u306F\u88C5\u7740\u306E\u307E\u307E"), /*#__PURE__*/
   React.createElement(TestIntervalWarn, { warn: warnTongue }), /*#__PURE__*/
   React.createElement("div", { className: "grid grid-cols-3 gap-2" },
@@ -4429,7 +4516,7 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
   React.createElement(SelectNum, { key: i, label: `${i + 1}回目`, unit: "kPa", specKey: "pedTongue", value: tongue3[i], onChange: (v) => setTongue(i, v), disabled: ro, free: true, measured: tongueMeasured })
   )
   ), /*#__PURE__*/
-  React.createElement("div", { className: `mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres === '' ? 'bg-gray-50 text-gray-500' : tongueGrade && tongueGrade.key === 'low' ? 'bg-red-50 text-red-700' : tongueGrade && tongueGrade.key === 'mid' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}` }, "\u5E73\u5747\uFF08\u6E2C\u5B9A\u5024\uFF09\uFF1A", /*#__PURE__*/
+  React.createElement("div", { className: `mt-2 rounded-xl px-4 py-2.5 text-sm font-medium ${tonguePres === '' || !tongueGrade ? 'bg-gray-50 text-gray-500' : tongueGrade.key === 'low' ? 'bg-red-50 text-red-700' : tongueGrade.key === 'mid' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}` }, "\u5E73\u5747\uFF08\u6E2C\u5B9A\u5024\uFF09\uFF1A", /*#__PURE__*/
   React.createElement("span", { className: "font-bold text-base" }, tonguePres !== '' ? tonguePres : '—'), " kPa", tongue3nums.length > 0 && tongue3nums.length < 3 ? `（${tongue3nums.length}回入力）` : '', !tongueMeasured && /*#__PURE__*/React.createElement("span", { className: "ml-2 text-[10px] font-medium text-gray-600 bg-gray-100 rounded px-1.5 py-0.5" }, tonguePres === '' ? '未検査' : '未検査（初期値のまま・保存されません）'),
   tongueGrade && tongueGrade.key === 'low' && /*#__PURE__*/React.createElement("span", { className: "ml-2 text-xs" }, "\u26A0 cut-off\u5024\u4EE5\u4E0B\uFF08\u2266", tongueNorm.cutoff, "kPa\uFF09\u2192 \u4F4E\u820C\u5727"),
   tongueGrade && tongueGrade.key === 'mid' && /*#__PURE__*/React.createElement("span", { className: "ml-2 text-xs" }, "\u3084\u3084\u5F31\u3081\uFF08\u5E73\u5747", tongueNorm.mean, "kPa\u3088\u308A\u4F4E\u3081\u30FBcut-off\u306F\u8D85\u3048\u3066\u3044\u307E\u3059\uFF09"),
@@ -4608,38 +4695,26 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
     step === 'training' && /*#__PURE__*/
     React.createElement("div", { className: "max-w-3xl mx-auto px-4 py-6 space-y-4" }, /*#__PURE__*/
     React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6" }, /*#__PURE__*/
-    React.createElement("h2", { className: "font-semibold text-gray-800 mb-1" }, "\uD83C\uDFC3 \u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u51E6\u65B9"), /*#__PURE__*/
-    React.createElement("p", { className: "text-xs text-gray-400 mb-4" }, "\u4E3B\u8A3A\u65AD\u3092\u512A\u5148\u3057\u3066\u6700\u5927", MAX_TRAININGS, "\u3064\u307E\u3067\u51E6\u65B9\u3055\u308C\u307E\u3059"),
+    React.createElement("h2", { className: "font-semibold text-gray-800 mb-1" }, "\uD83C\uDFC3 \u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u51E6\u65B9"),
+    isPreWeaning ? /*#__PURE__*/
+    React.createElement(React.Fragment, null, /*#__PURE__*/
+    React.createElement("p", { className: "text-xs text-gray-500 mb-4" }, "\u96E2\u4E73\u524D\uFF08\u5225\u7D191\uFF09\u306F\u7DF4\u7FD2\u3092\u51FA\u3055\u305A\u3001\u98DF\u3079\u65B9\u3092\u4F1D\u3048\u307E\u3059\uFF08\u30C1\u30A7\u30A2\u30B5\u30A4\u30C9\u300C\u8D64\u3061\u3083\u3093\u306E\u6B6F\u300D\u306E\u624B\u3065\u304B\u307F\u98DF\u3079\u306E\u6BB5\u3068\u540C\u3058\u6587\uFF09"),
+    checkedC.length > 0 ? /*#__PURE__*/
+    React.createElement(TrainCardScreen, { t: KIDS_PRE_FEEDING }) : /*#__PURE__*/
+    React.createElement("p", { className: "text-sm text-gray-500" }, "\u5F53\u3066\u306F\u307E\u308B\u9805\u76EE\u304C\u7121\u3044\u306E\u3067\u3001\u304A\u77E5\u3089\u305B\u306B\u98DF\u3079\u65B9\u306E\u6B04\u306F\u51FA\u307E\u305B\u3093")
+    ) :
     (() => {
       const trainings = prescribeTrainings(diagnosis);
-      return trainings.map((t, i) => /*#__PURE__*/
-      React.createElement("div", { key: i, className: "border border-gray-100 rounded-xl p-4 mb-3" }, /*#__PURE__*/
-      React.createElement("div", { className: "flex items-start gap-3" }, /*#__PURE__*/
-      React.createElement("div", { className: "text-2xl" }, t.icon || '✨'), /*#__PURE__*/
-      React.createElement("div", { className: "flex-1" }, /*#__PURE__*/
-      React.createElement("p", { className: "font-semibold text-gray-800" }, t.name), /*#__PURE__*/
-      React.createElement("p", { className: "text-sm text-gray-600 mt-1" }, t.desc), /*#__PURE__*/
-      React.createElement("p", { className: "text-xs text-blue-600 font-medium mt-1.5 bg-blue-50 inline-block px-2 py-0.5 rounded" }, "\uD83D\uDCC5 ", t.freq)
-      )
-      )
-      )
-      );
+      return (/*#__PURE__*/
+        React.createElement(React.Fragment, null, /*#__PURE__*/
+        React.createElement("p", { className: "text-xs text-gray-400 mb-4" }, "\u7DF4\u7FD2\u306F\u4E3B\u8A3A\u65AD\u3092\u512A\u5148\u3057\u3066\u6700\u5927", MAX_TRAININGS, "\u3064\uFF08\u98DF\u3079\u308B\u3068\u304D\u306E\u59FF\u52E2\u30FB\u304F\u305B\u30FB\u8A00\u8A9E\u8074\u899A\u58EB\u306F\u6570\u306B\u5165\u308C\u306A\u3044\uFF09\u3002\u756A\u53F7\u306F\u30C1\u30A7\u30A2\u30B5\u30A4\u30C9\u300C\u304A\u53E3\u306E\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u300D\u306E\u7DF4\u7FD2\u306E\u756A\u53F7\u3068\u540C\u3058\u3067\u3059"),
+        trainings.length ? /*#__PURE__*/
+        React.createElement("div", { className: "grid sm:grid-cols-2 gap-3" }, trainings.map((t) => /*#__PURE__*/React.createElement(TrainCardScreen, { key: t.key, t: t }))) : /*#__PURE__*/
+        React.createElement("p", { className: "text-sm text-gray-500" }, "\u5F53\u3066\u306F\u307E\u308B\u578B\u304C\u7121\u3044\u306E\u3067\u3001\u7DF4\u7FD2\u306F\u51FA\u307E\u305B\u3093\uFF08\u304A\u77E5\u3089\u305B\u306E\u88CF\u9762\u3082\u51FA\u307E\u305B\u3093\uFF09"),
+        trainings.length > 0 && /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mt-3" }, "\u304A\u77E5\u3089\u305B\u306E\u88CF\u9762\u306B\u306F\u3001\u3075\u3060\u3093\u306E\u304A\u53E3\u306E\u5F62\uFF08", REST_POSTURE.join('・'), "\uFF09\u3068\u300C", TRAIN_STOP_KIDS, "\u300D\u3082\u5370\u5237\u3055\u308C\u307E\u3059")
+        ));
+
     })()
-    ), /*#__PURE__*/
-    React.createElement("div", { className: "bg-orange-50 border border-orange-200 rounded-2xl p-4" }, /*#__PURE__*/
-    React.createElement("h3", { className: "font-semibold text-orange-800 mb-3" }, "\uD83D\uDC44 \u3042\u3044\u3046\u3079\u4F53\u64CD\u306E\u3084\u308A\u65B9"), /*#__PURE__*/
-    React.createElement("div", { className: "grid grid-cols-4 gap-2 text-center" },
-    [{ l: 'あ', d: 'のどの奥が見えるくらい\nお口を大きく開ける', c: 'bg-red-100' },
-    { l: 'い', d: '首に筋が張るくらい\n口角を横に大きく引く', c: 'bg-blue-100' },
-    { l: 'う', d: '唇をタコのように\n前に突き出す', c: 'bg-green-100' },
-    { l: 'べ', d: '舌の先をあごに向かって\n思い切り下へ伸ばす', c: 'bg-yellow-100' }].
-    map((item) => /*#__PURE__*/
-    React.createElement("div", { key: item.l, className: `${item.c} rounded-xl p-3` }, /*#__PURE__*/
-    React.createElement("div", { className: "text-xl font-bold mb-1" }, "\u300C", item.l, "\u30FC\u300D"), /*#__PURE__*/
-    React.createElement("div", { className: "text-xs text-gray-700 whitespace-pre-line leading-tight" }, item.d)
-    )
-    )
-    )
     ), /*#__PURE__*/
     React.createElement(NavBtns, { onBack: back, onNext: next, nextLabel: "\uD83D\uDDA8\uFE0F \u5370\u5237\u30D7\u30EC\u30D3\u30E5\u30FC\u3078 \u2192" })
     )
@@ -5434,22 +5509,10 @@ function AdultFlow({ patientId: initPid, assessmentId, mode, draft }) {
       if (tr.length === 0) return null;
       return (/*#__PURE__*/
         React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-5 space-y-3" }, /*#__PURE__*/
-        React.createElement("h2", { className: "font-semibold text-gray-800" }, "\uD83C\uDFC3 \u304A\u53E3\u306E\u6A5F\u80FD\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u51E6\u65B9", /*#__PURE__*/React.createElement("span", { className: "text-xs font-normal text-gray-400 ml-2" }, "\u8A72\u5F53\u9805\u76EE\u306E\u5BFE\u5FDC\u8A13\u7DF4")), /*#__PURE__*/
+        React.createElement("h2", { className: "font-semibold text-gray-800" }, "\uD83C\uDFC3 \u304A\u53E3\u306E\u6A5F\u80FD\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u51E6\u65B9", /*#__PURE__*/React.createElement("span", { className: "text-xs font-normal text-gray-400 ml-2" }, "\u8A18\u53F7 A\u301CH \u306F\u30C1\u30A7\u30A2\u30B5\u30A4\u30C9\u300C\u53E3\u8154\u6A5F\u80FD\u4F4E\u4E0B\u75C7\u300D\u306E\u7DF4\u7FD2\u306E\u8868\u3068\u540C\u3058")), /*#__PURE__*/
         React.createElement("div", { className: "grid sm:grid-cols-2 gap-3" },
         tr.map((t) => /*#__PURE__*/
-        React.createElement("div", { key: t.letter, className: "border border-blue-100 rounded-xl overflow-hidden" }, /*#__PURE__*/
-        React.createElement("div", { className: "bg-blue-600 text-white px-3 py-1.5 flex items-center gap-2" }, /*#__PURE__*/
-        React.createElement("span", { className: "w-5 h-5 rounded-full bg-white text-blue-600 text-xs font-bold flex items-center justify-center flex-shrink-0" }, t.letter), /*#__PURE__*/
-        React.createElement("span", { className: "text-sm font-semibold" }, t.icon, " ", t.name)
-        ), /*#__PURE__*/
-        React.createElement("div", { className: "bg-blue-50/50 px-3 py-2" }, /*#__PURE__*/
-        React.createElement("ol", { className: "text-xs text-gray-700 list-decimal list-inside space-y-0.5" },
-        t.steps.map((s, i) => /*#__PURE__*/React.createElement("li", { key: i }, s))
-        ), /*#__PURE__*/
-        React.createElement("p", { className: "text-xs text-blue-700 font-medium mt-1.5" }, "\uD83D\uDCA1 ", t.point), /*#__PURE__*/
-        React.createElement("p", { className: "text-xs text-gray-500 mt-0.5" }, "\u52B9\u679C\uFF1A", t.effects.join('／'))
-        )
-        )
+        React.createElement(TrainCardScreen, { key: t.letter, t: t })
         )
         )
         ));
@@ -5548,15 +5611,15 @@ function History({ patientId, returnTo }) {
         !isPed && (() => {const adultSorted = assessments.filter((x) => x.type === 'adult').sort(newestFirst); // v70: 同じ日の記録も保存順で前後を決める
           const notes = retestReviewNotes(a, adultSorted.slice(adultSorted.findIndex((x) => x.id === a.id) + 1));
           return notes.length ? /*#__PURE__*/React.createElement("p", { className: "text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1" }, "\u26A0 \u8981\u78BA\u8A8D\uFF1A", notes.join('／')) : null;})(),
-        isPed && a.diagnosis?.matchedPatterns?.length > 0 && /*#__PURE__*/
-        React.createElement("div", { className: "flex flex-wrap gap-1" },
-        a.diagnosis.matchedPatterns.map(({ patternId, type }) => {
-          const pat = PATTERNS[patternId];return pat ? /*#__PURE__*/
-          React.createElement("span", { key: patternId, className: `text-xs px-2 py-0.5 rounded-full ${type === 'primary' ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}` }, pat.name) :
-          null;
-        })
-        )
-
+        isPed && (() => {const pats = effectivePedPatterns(a, patient && patient.birth ? yearsAtDate(patient.birth, a.date) : null);return pats.length > 0 && /*#__PURE__*/ // v77: 3歳未満は測定値だけの型を外す（お知らせと同じ）
+          React.createElement("div", { className: "flex flex-wrap gap-1" },
+          pats.map(({ patternId, type }) => {
+            const pat = PATTERNS[patternId];return pat ? /*#__PURE__*/
+            React.createElement("span", { key: patternId, className: `text-xs px-2 py-0.5 rounded-full ${type === 'primary' ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}` }, pat.name) :
+            null;
+          })
+          );
+        })()
         ), /*#__PURE__*/
         React.createElement("div", { className: "flex gap-2" }, /*#__PURE__*/
         React.createElement("button", { onClick: (e) => {e.stopPropagation();nav({ p: 'print', assessmentId: a.id, from: 'history' });}, className: "p-2 text-blue-600 hover:bg-blue-50 rounded-lg", title: "\u5370\u5237" }, "\uD83D\uDDA8\uFE0F"), /*#__PURE__*/
@@ -5828,11 +5891,21 @@ function PrintPediatric({ a, ageYears, gender, patientName, prev }) {
   const lnP = lipForceNorm(ageYears, gender),tnP = pedTongueNorm(ageYears);
   const lipG = gradeBySD(a.lipClosureForce, lnP ? lnP.minus1sd : null, lnP ? lnP.mean : null, '不足');
   const tonG = gradeBySD(a.maxTonguePressure, tnP ? tnP.cutoff : null, tnP ? tnP.mean : null, '低舌圧');
-  const refWord = (low, g) => low ? '平均より弱めです' : g && g.key === 'mid' ? '平均より少し弱めです' : '平均的な力です';
-  const patterns = diagnosis?.matchedPatterns || [];
+  // v77: 3歳未満は比べる表が無い（norm＝null）ので「平均的」と書かない
+  const refWord = (low, g, norm) => !norm ? ageYears != null && ageYears < 3 ? '3歳から、同じ年齢の目安と比べます' : '' :
+  low ? '平均より弱めです' : g && g.key === 'mid' ? '平均より少し弱めです' : '平均的な力です';
+  const patterns = effectivePedPatterns(a, ageYears); // v77: 3歳未満は測定値だけで付いた型を外す
   const bodyIdx = a.height && a.weight ? computeBodyIndex(ageYears, a.height, a.weight) : null;
-  const trainings = prescribeTrainings(patterns);
-  const showAiube = trainings.some((t) => t.name.includes('あいうべ'));
+  // v77: 離乳前（別紙1）は練習を出さず食べ方を出す（当てはまった項目があれば。型に入らない項目だけでも）。練習の番号はチェアサイド「お口のトレーニング」と同じ
+  const pre = a.phase === 'pre';
+  const trainings = prescribeTrainings(patterns, { pre });
+  const checkedIds = Array.isArray(a.checkedCItems) ? a.checkedCItems : [];
+  const preFeeding = pre && checkedIds.length > 0;
+  const reEval = reEvalLabel(a.date);
+  // v77: 型に入らない項目（歯の生え方・むし歯・食べる量 など）も書く。型が0でも項目があれば「問題は見つかりませんでした」と書かない
+  const itemsOf = pre ? C_ITEMS_PRE : C_ITEMS_POST;
+  const plainOf = (it) => /^上記以外/.test(it.label) ? 'そのほかの所見' : !pre && C_PLAIN_POST[it.id] || it.label;
+  const otherItems = itemsOf.filter((it) => checkedIds.includes(it.id) && !(it.patterns || []).length).map(plainOf);
   // 前回値との比較コメント（前回より上がっていれば成長を褒める）
   const trend = (cur, pv, unit) => {
     if (!prev || pv == null || pv === '' || cur == null || cur === '') return null;
@@ -5844,61 +5917,77 @@ function PrintPediatric({ a, ageYears, gender, patientName, prev }) {
     React.createElement("div", null, /*#__PURE__*/
 
     React.createElement(Section, { title: "\u4ECA\u56DE\u898B\u3064\u304B\u3063\u305F\u6C17\u306B\u306A\u308B\u30DD\u30A4\u30F3\u30C8" },
-    patterns.length === 0 && /*#__PURE__*/React.createElement("div", { style: { background: '#f0fdf4', borderLeft: '4px solid #22c55e', padding: '8px 12px', borderRadius: '0 10px 10px 0' } }, /*#__PURE__*/React.createElement("p", { style: { fontWeight: '600', color: '#166534', fontSize: '13px' } }, "\u7279\u8A18\u3059\u3079\u304D\u554F\u984C\u306F\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F")),
+    patterns.length === 0 && otherItems.length === 0 && /*#__PURE__*/React.createElement("div", { style: { background: '#f0fdf4', borderLeft: '4px solid #22c55e', padding: '8px 12px', borderRadius: '0 10px 10px 0' } }, /*#__PURE__*/React.createElement("p", { style: { fontWeight: '600', color: '#166534', fontSize: '13px' } }, "\u7279\u8A18\u3059\u3079\u304D\u554F\u984C\u306F\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F")),
     patterns.map(({ patternId, type }) => {
       const pat = PATTERNS[patternId];if (!pat) return null;
       return (/*#__PURE__*/
         React.createElement("div", { key: patternId, className: "avoid-break", style: { background: '#fff1f2', borderLeft: '4px solid #f87171', padding: '6px 12px', borderRadius: '0 10px 10px 0', marginBottom: '5px' } }, /*#__PURE__*/
-        React.createElement("p", { style: { fontWeight: '600', color: '#111', fontSize: '13px' } }, "\u25CF ", pat.name, type === 'primary' && /*#__PURE__*/React.createElement("span", { style: { fontSize: '10px', color: '#dc2626', marginLeft: '6px' } }, "\u4E3B")), /*#__PURE__*/
-        React.createElement("p", { style: { fontSize: '11px', color: '#555', marginTop: '2px' } }, pat.desc)
+        React.createElement("p", { style: { fontWeight: '600', color: '#111', fontSize: '13px' } }, "\u25CF ", pat.plain || pat.name, type === 'primary' && /*#__PURE__*/React.createElement("span", { style: { fontSize: '10px', color: '#dc2626', marginLeft: '6px' } }, "\u4E3B")), /*#__PURE__*/
+        React.createElement("p", { style: { fontSize: '11px', color: '#555', marginTop: '2px' } }, pre && pat.descPre || pat.desc)
         ));
 
-    })
+    }),
+    otherItems.length > 0 && /*#__PURE__*/
+    React.createElement("div", { className: "avoid-break", style: { background: '#fff7ed', borderLeft: '4px solid #fb923c', padding: '6px 12px', borderRadius: '0 10px 10px 0', marginBottom: '5px' } }, /*#__PURE__*/
+    React.createElement("p", { style: { fontWeight: '600', color: '#111', fontSize: '13px' } }, "\u25CF ", patterns.length ? 'そのほかに当てはまった項目' : '当てはまった項目'), /*#__PURE__*/
+    React.createElement("p", { style: { fontSize: '11px', color: '#555', marginTop: '2px' } }, otherItems.join('・'))
+    )
+
     ),
     (a.lipClosureForce || a.maxTonguePressure || bodyIdx) && /*#__PURE__*/
     React.createElement(Section, { title: "\u691C\u67FB\u7D50\u679C" }, /*#__PURE__*/
     React.createElement("div", { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' } },
-    a.lipClosureForce && /*#__PURE__*/React.createElement(MCard, { label: "\u304F\u3061\u3073\u308B\u3092\u9589\u3058\u308B\u529B", value: a.lipClosureForce, unit: "N", abn: !!a.lipLow, ref_: trend(a.lipClosureForce, prev && prev.lipClosureForce, 'N') || refWord(a.lipLow, lipG) }),
-    a.maxTonguePressure && /*#__PURE__*/React.createElement(MCard, { label: "\u820C\u306E\u529B\uFF08\u820C\u5727\uFF09", value: a.maxTonguePressure, unit: "kPa", abn: !!a.tongueLow, ref_: trend(a.maxTonguePressure, prev && prev.maxTonguePressure, 'kPa') || refWord(a.tongueLow, tonG) }),
-    bodyIdx && /*#__PURE__*/React.createElement(MCard, { label: `体格（${a.height}cm・${a.weight}kg）`, value: bodyIdx.value, unit: "", note: bodyIdx.label, abn: bodyIdx.abnormal, ref_: bodyIdx.abnormal ? '少し注意しましょう' : '良好です' })
+    a.lipClosureForce && /*#__PURE__*/React.createElement(MCard, { label: "\u304F\u3061\u3073\u308B\u3092\u9589\u3058\u308B\u529B", value: a.lipClosureForce, unit: "N", abn: !!a.lipLow && !!lnP, ref_: trend(a.lipClosureForce, prev && prev.lipClosureForce, 'N') || refWord(a.lipLow && lnP, lipG, lnP) }),
+    a.maxTonguePressure && /*#__PURE__*/React.createElement(MCard, { label: "\u820C\u306E\u529B\uFF08\u820C\u5727\uFF09", value: a.maxTonguePressure, unit: "kPa", abn: !!a.tongueLow && !!tnP, ref_: trend(a.maxTonguePressure, prev && prev.maxTonguePressure, 'kPa') || refWord(a.tongueLow && tnP, tonG, tnP) }),
+    bodyIdx && /*#__PURE__*/React.createElement(MCard, { label: `体格（${a.height}cm・${a.weight}kg）`, value: bodyIdx.value, unit: "", note: bodyIdx.label, abn: bodyIdx.abnormal, ref_: bodyIdx.abnormal ? '目安から外れています' : '良好です' })
     )
     ),
 
     a.notes && /*#__PURE__*/React.createElement(Section, { title: "\u30E1\u30E2\u30FB\u6240\u898B" }, /*#__PURE__*/React.createElement("p", { style: { fontSize: '12px', color: '#374151', background: '#f8fafc', borderRadius: '10px', padding: '8px 12px', whiteSpace: 'pre-line' } }, a.notes)),
 
 
-    trainings.length > 0 && /*#__PURE__*/
+    (trainings.length > 0 || preFeeding) && /*#__PURE__*/
     React.createElement("div", { className: "pb-next" }, /*#__PURE__*/
     React.createElement("div", { style: { textAlign: 'center', margin: '4px 0 10px' } }, /*#__PURE__*/
-    React.createElement("h1", { style: { fontSize: '16px', fontWeight: '700', color: '#1e40af' } }, patientName, " \u3055\u3093\u306E \u304A\u3046\u3061\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0"), /*#__PURE__*/
+    React.createElement("h1", { style: { fontSize: '16px', fontWeight: '700', color: '#1e40af' } }, patientName, " \u3055\u3093\u306E ", preFeeding ? 'おうちでの食べ方' : 'おうちトレーニング'),
+    !preFeeding && /*#__PURE__*/React.createElement("p", { style: { fontSize: '10px', color: '#888', marginTop: '2px' } }, "\u7DF4\u7FD2\u306E\u756A\u53F7\u306F\u3001\u533B\u9662\u3067\u304A\u898B\u305B\u3057\u305F\u8AAC\u660E\u306E\u753B\u9762\u3068\u540C\u3058\u3067\u3059\u3002"), /*#__PURE__*/
     React.createElement("div", { style: { height: '2px', background: '#1d4ed8', margin: '6px 64px 0' } })
-    ), /*#__PURE__*/
-    React.createElement(Section, { title: "\u3054\u5BB6\u5EAD\u3067\u306E\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u51E6\u65B9" },
-    trainings.map((t, i) => /*#__PURE__*/
-    React.createElement("div", { key: i, className: "avoid-break", style: { border: '1px solid #dbeafe', background: '#eff6ff', borderRadius: '10px', padding: '8px 12px', marginBottom: '6px' } }, /*#__PURE__*/
-    React.createElement("p", { style: { fontWeight: '600', color: '#1e3a8a', fontSize: '13px' } }, t.icon, " ", t.name, /*#__PURE__*/React.createElement("span", { style: { fontSize: '11px', color: '#2563eb', fontWeight: '500', marginLeft: '8px' } }, "\uD83D\uDCC5 ", t.freq)), /*#__PURE__*/
-    React.createElement("p", { style: { fontSize: '11px', color: '#374151', marginTop: '2px' } }, t.desc)
-    )
-    )
     ),
-    showAiube && /*#__PURE__*/
-    React.createElement(Section, { title: "\uD83D\uDC44 \u3042\u3044\u3046\u3079\u4F53\u64CD\u306E\u3084\u308A\u65B9\uFF081\u65E530\u56DE\uFF09" }, /*#__PURE__*/
-    React.createElement("div", { style: { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '6px', textAlign: 'center' } },
-    [{ l: 'あ', d: 'のどの奥が見えるくらいお口を大きく開ける', c: '#fef2f2' },
-    { l: 'い', d: '首に筋が張るくらい口角を横に大きく引く', c: '#eff6ff' },
-    { l: 'う', d: '唇をタコのように前に思い切り突き出す', c: '#f0fdf4' },
-    { l: 'べ', d: '舌の先をあごの先に向かって思い切り下へ伸ばす', c: '#fefce8' }].
-    map((item) => /*#__PURE__*/
-    React.createElement("div", { key: item.l, style: { background: item.c, borderRadius: '10px', padding: '8px' } }, /*#__PURE__*/
-    React.createElement("div", { style: { fontSize: '15px', fontWeight: '700', marginBottom: '2px' } }, "\u300C", item.l, "\u30FC\u300D"), /*#__PURE__*/
-    React.createElement("div", { style: { fontSize: '10px', color: '#555', lineHeight: '1.4' } }, item.d)
+    preFeeding ? /*#__PURE__*/
+    React.createElement(Section, { title: "\u96E2\u4E73\u304C\u7D42\u308F\u308B\u307E\u3067" }, /*#__PURE__*/
+    React.createElement(TrainCardPrint, { t: KIDS_PRE_FEEDING })
+    ) : /*#__PURE__*/
+
+    React.createElement(React.Fragment, null, /*#__PURE__*/
+    React.createElement(Section, { title: "\u3075\u3060\u3093\u306E\u304A\u53E3\u306E\u5F62" }, /*#__PURE__*/
+    React.createElement("div", { style: { display: 'flex', flexWrap: 'wrap', gap: '5px' } },
+    REST_POSTURE.map((x) => /*#__PURE__*/React.createElement("span", { key: x, style: { fontSize: '11px', color: '#1e3a8a', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '3px 9px' } }, x))
     )
+    ), /*#__PURE__*/
+    React.createElement(Section, { title: "\u3054\u5BB6\u5EAD\u3067\u306E\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0" }, /*#__PURE__*/
+
+    React.createElement("div", { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '8px', alignItems: 'start' } },
+    trainings.filter((t) => t.no != null).map((t) => /*#__PURE__*/React.createElement(TrainCardPrint, { key: t.key, t: t }))
+    ),
+    trainings.some((t) => t.no == null) && /*#__PURE__*/
+    React.createElement("div", { className: "avoid-break", style: { border: '1px solid #fed7aa', background: '#fff7ed', borderRadius: '9px', padding: '5px 9px', marginBottom: '4px', breakInside: 'avoid' } }, /*#__PURE__*/
+    React.createElement("p", { style: { fontSize: '11px', fontWeight: '700', color: '#9a3412', marginBottom: '1px' } }, "\u3075\u3060\u3093\u306E\u751F\u6D3B\u3067"),
+    trainings.filter((t) => t.no == null).map((t) => /*#__PURE__*/
+    React.createElement("p", { key: t.key, style: { fontSize: '10.5px', color: '#1f2937', lineHeight: '1.4', marginTop: '1px' } }, /*#__PURE__*/
+    React.createElement("b", null, t.icon, " ", t.name),
+    t.forLabels && t.forLabels.length > 0 && /*#__PURE__*/React.createElement("span", { style: { fontSize: '9.5px', color: '#9a3412' } }, "\uFF08", t.forLabels.map((x) => `「${x}」`).join(''), "\uFF09"), "\uFF1A",
+    t.steps.join(' '),
+    (t.point || []).length > 0 && /*#__PURE__*/React.createElement("span", { style: { fontSize: '9.5px', color: '#6b7280' } }, "\uFF08", t.point.join('。'), "\uFF09")
     )
     )
     ), /*#__PURE__*/
 
+    React.createElement("p", { style: { fontSize: '10px', color: '#92400e', marginTop: '2px' } }, "\u203B ", TRAIN_STOP_KIDS)
+    )
+    ), /*#__PURE__*/
+
     React.createElement("div", { style: { background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '8px 12px', marginTop: '8px' } }, /*#__PURE__*/
-    React.createElement("p", { style: { fontSize: '11px', color: '#92400e' } }, "\uD83D\uDCA1 \u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u306F\u6BCE\u65E5\u5C11\u3057\u305A\u3064\u7D9A\u3051\u308B\u3053\u3068\u304C\u5927\u5207\u3067\u3059\u30023\u304B\u6708\u5F8C\u306B\u52B9\u679C\u3092\u78BA\u8A8D\u3057\u307E\u3059\u306E\u3067\u3001\u6B21\u56DE\u3082\u3054\u6765\u9662\u304F\u3060\u3055\u3044\u3002")
+    React.createElement("p", { style: { fontSize: '11px', color: '#92400e' } }, "\uD83D\uDCA1 ", preFeeding ? `${reEval}に、もう一度お口の様子を確かめます。` : `${reEval}に測り直して、練習を入れかえます。`, "\u6B21\u56DE\u3082\u3054\u6765\u9662\u304F\u3060\u3055\u3044\u3002")
     )
     )
 
@@ -5952,24 +6041,28 @@ function PrintAdult({ a, patientName, prev }) {
     ), /*#__PURE__*/
     React.createElement("p", { style: { fontSize: '10px', color: '#888', marginTop: '4px' } }, "\u30AA\u30EC\u30F3\u30B8\u306E\u70B9\u7DDA\u304C\u300C\u57FA\u6E96\u30E9\u30A4\u30F3\u300D\u3067\u3059\u3002\u7DDA\u306E\u5185\u5074\u306B\u3078\u3053\u3093\u3067\u3044\u308B\u9805\u76EE\u304C\u3001\u5E73\u5747\u3088\u308A\u5F31\u3081\u306E\u3068\u3053\u308D\u3067\u3059\u3002", prev && '灰色の点線は前回の結果です。', partial && '白い丸（未検査）は今回測っていない項目です。')
     ),
-    a.notes && /*#__PURE__*/React.createElement(Section, { title: "\u6B6F\u79D1\u533B\u9662\u304B\u3089\u306E\u3072\u3068\u3053\u3068" }, /*#__PURE__*/React.createElement("p", { style: { fontSize: '13px', color: '#374151', background: '#f8fafc', borderRadius: '10px', padding: '10px 14px', whiteSpace: 'pre-line' } }, a.notes)), /*#__PURE__*/
+    a.notes && /*#__PURE__*/React.createElement(Section, { title: "\u6B6F\u79D1\u533B\u9662\u304B\u3089\u306E\u3072\u3068\u3053\u3068" }, /*#__PURE__*/React.createElement("p", { style: { fontSize: '13px', color: '#374151', background: '#f8fafc', borderRadius: '10px', padding: '10px 14px', whiteSpace: 'pre-line' } }, a.notes)),
+
+    trainings.length > 0 && /*#__PURE__*/
     React.createElement("div", { style: { background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '10px 14px', marginTop: '8px' } }, /*#__PURE__*/
-    React.createElement("p", { style: { fontSize: '12px', color: '#92400e' } }, "\uD83D\uDCA1 \u6C17\u306B\u306A\u308B\u9805\u76EE\u306F\u3001\u88CF\u9762\u306E\u304A\u53E3\u306E\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u3067\u6539\u5584\u304C\u671F\u5F85\u3067\u304D\u307E\u3059\u3002\u6B21\u56DE\u306E\u3054\u6765\u9662\u6642\u306B\u3001\u3044\u3063\u3057\u3087\u306B\u78BA\u8A8D\u3057\u3066\u3044\u304D\u307E\u3057\u3087\u3046\u3002")
+    React.createElement("p", { style: { fontSize: '12px', color: '#92400e' } }, "\uD83D\uDCA1 \u88CF\u9762\u306E\u7DF4\u7FD2\u3092\u6BCE\u65E5\u7D9A\u3051\u3066\u304F\u3060\u3055\u3044\u3002", reEvalLabel(a.date), "\u306B\u6E2C\u308A\u76F4\u3057\u3066\u3001\u7DF4\u7FD2\u3092\u5165\u308C\u304B\u3048\u307E\u3059\u3002")
     ),
+
 
 
     trainings.length > 0 && /*#__PURE__*/
     React.createElement("div", { className: "pb-next" }, /*#__PURE__*/
     React.createElement("div", { style: { textAlign: 'center', margin: '4px 0 10px' } }, /*#__PURE__*/
     React.createElement("h1", { style: { fontSize: '16px', fontWeight: '700', color: '#1e40af' } }, patientName, " \u3055\u3093\u306E \u304A\u53E3\u306E\u6A5F\u80FD\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0"), /*#__PURE__*/
-    React.createElement("p", { style: { fontSize: '10px', color: '#888', marginTop: '2px' } }, "\u6C17\u306B\u306A\u308B\u9805\u76EE\u306B\u5BFE\u5FDC\u3057\u305F\u30C8\u30EC\u30FC\u30CB\u30F3\u30B0\u3067\u3059\u3002\u6BCE\u65E5\u5C11\u3057\u305A\u3064\u7D9A\u3051\u307E\u3057\u3087\u3046\u3002"), /*#__PURE__*/
+    React.createElement("p", { style: { fontSize: '10px', color: '#888', marginTop: '2px' } }, "\u8A18\u53F7\uFF08A\u301CH\uFF09\u306F\u3001\u533B\u9662\u3067\u304A\u898B\u305B\u3057\u305F\u8AAC\u660E\u306E\u753B\u9762\u3068\u540C\u3058\u3067\u3059\u3002"), /*#__PURE__*/
     React.createElement("div", { style: { height: '2px', background: '#1d4ed8', margin: '6px 64px 0' } })
     ), /*#__PURE__*/
 
     React.createElement("div", { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: '8px', alignItems: 'start' } },
     trainings.map((t) => /*#__PURE__*/React.createElement(TrainCardPrint, { key: t.letter, t: t }))
     ), /*#__PURE__*/
-    React.createElement("p", { style: { fontSize: '9px', color: '#aaa', marginTop: '6px' } }, "\u53C2\u8003\uFF1A\u53E3\u8154\u6A5F\u80FD\u5411\u4E0A\u306E\u305F\u3081\u306E\u5B9F\u5730\u6307\u5C0E\u5185\u5BB9")
+    React.createElement("p", { style: { fontSize: '10px', color: '#92400e', marginTop: '2px' } }, "\u203B ", TRAIN_STOP_ADULT), /*#__PURE__*/
+    React.createElement("p", { style: { fontSize: '9px', color: '#aaa', marginTop: '4px' } }, "\u53C2\u8003\uFF1A\u53E3\u8154\u6A5F\u80FD\u5411\u4E0A\u306E\u305F\u3081\u306E\u5B9F\u5730\u6307\u5C0E\u5185\u5BB9")
     )
 
     ));
@@ -5985,9 +6078,10 @@ const NOTE_TEMPLATES = {
   pediatric: [
   { label: '🏃 訓練開始', text: '口腔機能発達不全症と診断。ご家庭でのトレーニングを処方し、3か月間実施のうえ再評価を行う。保護者へ指導内容を説明した。' },
   { label: '🎯 機能獲得', text: '正常な口腔機能の獲得を目標に、口腔周囲筋の訓練と生活習慣（食事姿勢・鼻呼吸）の指導を行う。' },
-  { label: '👄 口唇閉鎖力', text: '口唇閉鎖力の向上を目標に、リップルトレーナー等による口唇訓練を毎日実施するよう指導した。' },
-  { label: '👀 経過観察', text: '機能の発達を経過観察とし、約3か月後に再評価を行う。' }],
-
+  { label: '👄 口唇閉鎖力', text: '口唇閉鎖力の向上を目標に、りっぷるとれーなー等による口唇訓練を毎日実施するよう指導した。' },
+  { label: '👀 経過観察', text: '機能の発達を経過観察とし、約3か月後に再評価を行う。' },
+  { label: '🥄 離乳前', text: '離乳前のため練習は処方せず、食べ方と姿勢（手づかみ食べ・足の裏が台につくいす）を保護者に指導した。約3か月後に再評価を行う。' } // v77
+  ],
   adult: [
   { label: '🏃 訓練開始', text: '口腔機能低下症と診断。該当項目に対応するお口の機能トレーニングを処方し、3か月間実施のうえ再評価を行う。' },
   { label: '🎯 機能維持', text: '現在の口腔機能の維持を目標に、お口の体操の継続と定期的な経過観察を行う。' },
@@ -6132,10 +6226,12 @@ function PlanPediatric({ a, patient, ageYears, prev, clinic }) {
   const tongueGrade = gradeBySD(a.maxTonguePressure, tn ? tn.cutoff : null, tn ? tn.mean : null, '低舌圧');
   const gradeBg = (g) => g && g.key === 'low' ? '#fef2f2' : g && g.key === 'mid' ? '#fffbeb' : '#fff';
   const bodyIdx = a.height && a.weight ? computeBodyIndex(ageYears, a.height, a.weight) : null;
-  const patterns = a.diagnosis?.matchedPatterns || [];
-  const trainings = prescribeTrainings(patterns);
-  const tLabel = trainings.map((t) => t.name).join('、');
+  const patterns = effectivePedPatterns(a, ageYears); // v77: 3歳未満は測定値だけで付いた型を外す（お知らせと同じ）
+  const trainings = prescribeTrainings(patterns, { pre: isPre }); // v77: 離乳前は練習を出さない
+  const tLabel = isPre && (a.checkedCItems || []).length > 0 ? `${KIDS_PRE_FEEDING.name}（離乳前）` :
+  trainings.map((t) => `${t.no ? `練習${t.no} ` : ''}${t.name}`).join('、');
   const pv = prev || {};
+  const noNorm = ageYears != null && ageYears < 3; // v77: 3歳未満は比べる表が無い
   return (/*#__PURE__*/
     React.createElement("div", null, /*#__PURE__*/
     React.createElement(Section, { title: `該当チェック項目（${isPre ? '別紙1・離乳完了前' : '別紙2・離乳完了後'}）` },
@@ -6162,15 +6258,15 @@ function PlanPediatric({ a, patient, ageYears, prev, clinic }) {
     React.createElement("td", { style: PT_TD }, "\u53E3\u5507\u9589\u9396\u529B\uFF08\u308A\u3063\u3077\u308B\u304F\u3093\uFF09"),
     prev && /*#__PURE__*/React.createElement("td", { style: { ...PT_TD, textAlign: 'center', color: '#6b7280' } }, pv.lipClosureForce ? `${pv.lipClosureForce}N` : '—'), /*#__PURE__*/
     React.createElement("td", { style: { ...PT_TD, textAlign: 'center', fontWeight: '600' } }, a.lipClosureForce ? `${a.lipClosureForce}N` : '未検査'), /*#__PURE__*/
-    React.createElement("td", { style: { ...PT_TD, fontSize: '9.5px' } }, ln ? `${ln.age}歳${ln.gender === 'f' ? '女' : '男'} 平均${ln.mean}・-1SD ${ln.minus1sd}N` : '—'), /*#__PURE__*/
-    React.createElement("td", { style: { ...PT_TD, textAlign: 'center', fontWeight: '700', color: lipGrade ? lipGrade.color : '#16a34a' } }, a.lipClosureForce ? lipGrade ? lipGrade.label : '良好' : '—')
+    React.createElement("td", { style: { ...PT_TD, fontSize: '9.5px' } }, ln ? `${ln.age}歳${ln.gender === 'f' ? '女' : '男'} 平均${ln.mean}・-1SD ${ln.minus1sd}N` : noNorm ? '表は3歳から' : '—'), /*#__PURE__*/
+    React.createElement("td", { style: { ...PT_TD, textAlign: 'center', fontWeight: '700', color: lipGrade ? lipGrade.color : ln ? '#16a34a' : '#6b7280' } }, a.lipClosureForce ? lipGrade ? lipGrade.label : ln ? '良好' : '比較なし' : '—')
     ), /*#__PURE__*/
     React.createElement("tr", { style: { background: gradeBg(tongueGrade) } }, /*#__PURE__*/
     React.createElement("td", { style: PT_TD }, "\u6700\u5927\u820C\u5727\uFF08JMS\u820C\u5727\u8A08\uFF09"),
     prev && /*#__PURE__*/React.createElement("td", { style: { ...PT_TD, textAlign: 'center', color: '#6b7280' } }, pv.maxTonguePressure ? `${pv.maxTonguePressure}kPa` : '—'), /*#__PURE__*/
     React.createElement("td", { style: { ...PT_TD, textAlign: 'center', fontWeight: '600' } }, a.maxTonguePressure ? `${a.maxTonguePressure}kPa` : '未検査'), /*#__PURE__*/
-    React.createElement("td", { style: { ...PT_TD, fontSize: '9.5px' } }, tn ? `${tn.age}歳 平均${tn.mean}・cut-off ${tn.cutoff}kPa` : '—'), /*#__PURE__*/
-    React.createElement("td", { style: { ...PT_TD, textAlign: 'center', fontWeight: '700', color: tongueGrade ? tongueGrade.color : '#16a34a' } }, a.maxTonguePressure ? tongueGrade ? tongueGrade.label : '良好' : '—')
+    React.createElement("td", { style: { ...PT_TD, fontSize: '9.5px' } }, tn ? `${tn.age}歳 平均${tn.mean}・cut-off ${tn.cutoff}kPa` : noNorm ? '表は3歳から' : '—'), /*#__PURE__*/
+    React.createElement("td", { style: { ...PT_TD, textAlign: 'center', fontWeight: '700', color: tongueGrade ? tongueGrade.color : tn ? '#16a34a' : '#6b7280' } }, a.maxTonguePressure ? tongueGrade ? tongueGrade.label : tn ? '良好' : '比較なし' : '—')
     ), /*#__PURE__*/
     React.createElement("tr", { style: { background: bodyIdx && bodyIdx.abnormal ? '#fef2f2' : '#fff' } }, /*#__PURE__*/
     React.createElement("td", { style: PT_TD }, "\u4F53\u683C\uFF08", bodyIdx ? bodyIdx.name : 'カウプ/ローレル', "\uFF09"),
@@ -6379,6 +6475,35 @@ function runSelfTests() {
   t('処方: L-4で未測定なら4種', prescribeAdultTrainings(['L-4'], {}).map((x) => x.letter), ['B', 'C', 'D', 'F']);
   t('処方: L-4でパのみ低下ならB・F', prescribeAdultTrainings(['L-4'], { ddk_pa: '5', ddk_ta: '7', ddk_ka: '7' }).map((x) => x.letter), ['B', 'F']);
   t('処方: 該当なしは0件', prescribeAdultTrainings([], {}).length, 0);
+  // v77: 練習の文をチェアサイド（mft・teika・hattatsu）とそろえた（院長 11/7）
+  const kidsDx = (items, ids) => computePediatricDiagnosis(items.filter((it) => ids.includes(it.id)), false, false);
+  const kidsKeys = (ids, opt) => prescribeTrainings(kidsDx(C_ITEMS_POST, ids), opt).map((x) => x.key);
+  t('v77: 発音（C-9・C-12）＋舌が前に（C-7）でもパタカラは1枚', kidsKeys(['C-9', 'C-12', 'C-7']).filter((k) => k === 'pataka').length, 1);
+  t('v77: 舌が前に（C-7）だけ＝舌を上げる・パタカラ（番号順）', kidsKeys(['C-7']), ['tongue', 'pataka']);
+  t('v77: 舌圧トレーニングとポッピングは「練習1 舌を上げる」の1枚', kidsKeys(['C-17']), ['tongue']);
+  t('v77: 助言（姿勢・くせ）は4つの枠に入れない＝低舌圧の練習1が落ちない', kidsKeys(['C-2', 'C-11', 'C-10', 'C-17']), ['tongue', 'lip', 'aiube', 'gum', 'habit', 'posture']);
+  t('v77: 練習は最大4つ・ガムは後回し・助言はそのあと', kidsKeys(['C-5', 'C-7', 'C-9', 'C-10', 'C-11', 'C-16', 'C-17']), ['tongue', 'lip', 'aiube', 'pataka', 'posture', 'speech', 'habit']);
+  t('v77: かみ方の型＝あいうべ・ガム・食べるときの姿勢', kidsKeys(['C-5']), ['aiube', 'gum', 'posture']);
+  t('v77: 離乳前（別紙1）は練習を出さない', prescribeTrainings(kidsDx(C_ITEMS_PRE, ['C-8', 'C-10']), { pre: true }).length, 0);
+  t('v77: 練習の番号はお口のトレーニングのページと同じ', ['tongue', 'lip', 'aiube', 'pataka', 'gum'].map((k) => KIDS_TRAININGS[k].no), [1, 2, 3, 4, 5]);
+  tOk('v77: あいうべの文はどの型から来ても同じ', (() => {const a1 = prescribeTrainings(kidsDx(C_ITEMS_POST, ['C-16', 'C-15', 'C-14'])).find((x) => x.key === 'aiube'),a2 = prescribeTrainings(kidsDx(C_ITEMS_POST, ['C-10'])).find((x) => x.key === 'aiube');return !!a1 && !!a2 && JSON.stringify(a1.steps) === JSON.stringify(a2.steps);})());
+  t('v77: 口で息（C-14）だけなら「口で息」のための練習', (prescribeTrainings(kidsDx(C_ITEMS_POST, ['C-14'])).find((x) => x.key === 'lip') || {}).forLabels, ['口で息']);
+  t('v77: いびき（C-16）の型は「いびき」（睡眠時無呼吸と書かない）', PATTERNS.sleepApnea.plain, 'いびき（扁桃が大きい）');
+  tOk('v77: 型の名前に「おロポカン」（カタカナのロ）が無い', Object.values(PATTERNS).every((p) => !/おロ/.test(p.name + p.plain)));
+  tOk('v77: 根拠の見つからなかった文を載せない（ほうれい線・噛みにくく・誤嚥・200〜300g）', !/ほうれい線|噛みにくく|誤嚥|200〜300g/.test(JSON.stringify([ADULT_TRAININGS, KIDS_TRAININGS, PATTERNS])));
+  t('v77: 大人 C 舌回し＝「お口の乾き」「舌の力」のための練習', prescribeAdultTrainings(['L-2', 'L-5'], {}).find((x) => x.letter === 'C').forLabels, ['お口の乾き', '舌の力']);
+  t('v77: 大人 L-4 でパだけ遅い→B・F は「舌と唇の動き」', prescribeAdultTrainings(['L-4'], { ddk_pa: '5', ddk_ta: '7', ddk_ka: '7' }).map((x) => x.forLabels.join()), ['舌と唇の動き', '舌と唇の動き']);
+  tOk('v77: 大人の練習は手順・ポイント・注意の欄を持つ', Object.values(ADULT_TRAININGS).every((x) => Array.isArray(x.note) && Array.isArray(x.point) && x.steps.length > 0));
+  t('v77: 3歳未満は唇の力を比べない', lipForceNorm(2, 'male'), null);
+  t('v77: 3歳未満は舌圧を比べない', pedTongueNorm(2), null);
+  tOk('v77: 3歳ちょうどは比べる', !!lipForceNorm(3, 'male') && !!pedTongueNorm(3));
+  // v77（点検の指摘）
+  t('v77: L-4 を手で付けて全部6以上でも練習が出る（B・C・D・F）', prescribeAdultTrainings(['L-4'], { ddk_pa: '6.4', ddk_ta: '6.2', ddk_ka: '6.0' }).map((x) => x.letter), ['B', 'C', 'D', 'F']);
+  t('v77: L-4 を引き継ぎ・パだけ測って6以上→測っていないタ・カの練習（C・D・F）', prescribeAdultTrainings(['L-4'], { ddk_pa: '6.5' }).map((x) => x.letter), ['C', 'D', 'F']);
+  const old2 = { diagnosis: { matchedPatterns: [{ patternId: 'lipClosure', matched: ['口唇閉鎖力 -1SD以下'], type: 'primary' }, { patternId: 'tonguePressure', matched: ['低舌圧'], type: 'secondary' }, { patternId: 'mastication', matched: ['C-5'], type: 'secondary' }] } };
+  t('v77: 3歳未満の旧記録＝測定値だけの型は外し、残りを主に', effectivePedPatterns(old2, 2).map((p) => p.patternId + ':' + p.type), ['mastication:primary']);
+  t('v77: 3歳以上の記録は型をそのまま', effectivePedPatterns(old2, 3).length, 3);
+  t('v77: 型の無い古い形でも落ちない', effectivePedPatterns({}, 2), []);
 
   // --- 小児のスコアリング ---
   const eat2 = C_ITEMS_POST.filter((x) => x.fn === '食べる').slice(0, 2).map((x) => x.id);
