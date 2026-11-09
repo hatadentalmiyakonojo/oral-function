@@ -1001,7 +1001,7 @@ body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
 </script>
 <script>
 /* ROSTER-CLIENT:BEGIN v1 ─ 患者名簿の窓口につなぐ部品（正本: Ai/患者名簿/client/roster-client.js・直接直さない） */
-/* 患者名簿の窓口（Mac mini :8446）につなぐ部品。歯周検査・口腔機能管理で共通。
+/* 患者名簿の窓口（Mac mini :8446）につなぐ部品。歯周検査・口腔機能管理・インプラント記録・照会状で共通。
    正本は 患者名簿/client/roster-client.js。アプリには 患者名簿/client/inline_roster_client.py で埋め込む
    （アプリの中の ROSTER-CLIENT:BEGIN〜END は手で直さない）。
 
@@ -1010,8 +1010,11 @@ body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
    - 毎回の問い合わせに判子（HMAC-SHA256：方式・道・時刻・使い捨ての値・中身の指紋）を付ける。鍵そのものは送らない
    - 番号や名前は住所（URL）に入れず中身で送る。返事は保存しない（呼び出し側も、タップして登録した人のほかは覚えない）
    - 3秒で返事が無ければあきらめる（手で入れられるまま待たせない）
-   - 鍵はアプリごとに別の置き場所（'device:perio'・'device:oral'）。2つのアプリは同じ住所（github.io）なので、
+   - 鍵はアプリごとに別の置き場所（'device:perio'・'device:oral'・'device:implant'・'device:shokai'＝インプラント記録と照会状は院内ポータル :8445 の住所）。
+     同じ住所のアプリ（github.io の2つ・:8445 の2つ）は IndexedDB を共有するので、
      置き場所を分けないと片方のつなぎ直しでもう片方の鍵が入れ替わる。アプリは最初に HataRoster.app を決める
+   - 番号で見つからないとき（初診の方＝当日の受付でどこでもアポに番号が入る）は lookupFresh が窓口に取り直しを頼み、
+     終わるのを待って（最長4分）もう一度聞く。古い返事を捨てるのはアプリの役目（今までどおり返事の番号と今の欄を比べる）
    - 「鍵を消す」は、窓口にもその鍵を使えなくするよう伝えてから消す
    - 同じ住所の別のアプリに悪いプログラムが入ると、この鍵で判子を押せてしまう（取り出せないが、その場では使える）。
      窓口の回数の上限（1台・24時間で100人）が被害の上限
@@ -1019,9 +1022,9 @@ body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
 (function () {
   'use strict';
   var DB = 'hata-roster', STORE = 'keys';
-  var R = { url: 'https://mini.hatadental.net:8446', timeoutMs: 3000, offset: 0, app: '' };
+  var R = { url: 'https://mini.hatadental.net:8446', timeoutMs: 3000, offset: 0, app: '', pollMs: 8000, waitMaxMs: 240000 };
   function slot() {
-    if (R.app !== 'perio' && R.app !== 'oral') throw Object.assign(new Error('アプリが決まっていません（HataRoster.app）'), { kind: 'input' });
+    if (R.app !== 'perio' && R.app !== 'oral' && R.app !== 'implant' && R.app !== 'shokai') throw Object.assign(new Error('アプリが決まっていません（HataRoster.app）'), { kind: 'input' });
     return 'device:' + R.app;
   }
   var enc = new TextEncoder();
@@ -1140,8 +1143,45 @@ body { -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
       });
     });
   }
-  // 戻り値 {no（聞いた番号そのまま）, found, item:{no,sei,mei,seiKana,meiKana,birth,sex}|null, asof, stale}
-  R.lookup = function (no) { return signed('/v1/lookup', { no: String(no) }); };
+  // 戻り値 {no（聞いた番号そのまま）, found, item:{no,sei,mei,seiKana,meiKana,birth,sex[,tel＝照会状の鍵のときだけ]}|null, asof, stale}
+  // fresh===true＝見つからなければ窓口が取り直しを始める（返事の refreshing）。ふつうは lookupFresh から使う
+  R.lookup = function (no, fresh) { return signed('/v1/lookup', fresh === true ? { no: String(no), fresh: true } : { no: String(no) }); };
+  // 見つからなければ名簿を取り直して、もう一度聞く。onWait(返事) は取り直しを待ち始めたときに呼ぶ（「取り直しています」を出す）。
+  // 中で R.lookup・R.status を呼ぶ（アプリの自己テストが R.lookup を差し替えると、ここもその差し替えを通る）。
+  // 戻り値は lookup と同じ形（待ったときは waited:true・取り直しが失敗して終わったときは refresh_failed:true も）。同じ番号を待っている最中にまた呼ばれたら、同じ待ちに相乗りする
+  // （ホームと登録の画面で同じ番号を引いても、取り直しの終わりを2つで待たない・どちらにも同じ答えが届く）
+  var waiting = {};
+  function sleep(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
+  R.lookupFresh = function (no, onWait) {
+    no = String(no);
+    var w = waiting[no];
+    if (w) {
+      if (onWait) { try { onWait(w.first); } catch (e) { /* 表示の失敗で待ちを止めない */ } }
+      return w.p;
+    }
+    var t0 = Date.now();
+    return R.lookup(no, true).then(function (j) {
+      if (j.found || !j.refreshing) return j;
+      function poll() {
+        return sleep(R.pollMs).then(function () {
+          return R.status();                                           // 差し替えた R.status がその場で投げても下の ng へ
+        }).then(function (s) { return s; }, function () { return null; }).then(function (s) {
+          if (!s) return j;                                            // つながらない＝最初の返事（見つからない）のまま
+          if (s.refreshing) return Date.now() - t0 < R.waitMaxMs ? poll() : j;
+          return R.lookup(no).then(function (j2) {
+            j2.waited = true;
+            if (s.refresh_failed) j2.refresh_failed = true;            // 取り直しが失敗して終わった（どこでもアポに入れなかった等）
+            return j2;
+          }, function () { return j; });
+        });
+      }
+      w = waiting[no] = { first: j, p: null };
+      // 待ちは成功でも失敗でも必ず片付ける（残ると、同じ番号の次の問い合わせが古い答えにつながる）
+      w.p = poll().then(function (r) { delete waiting[no]; return r; }, function (e) { delete waiting[no]; throw e; });
+      if (onWait) { try { onWait(j); } catch (e) { /* 同上 */ } }
+      return w.p;
+    });
+  };
   R.search = function (q) { return signed('/v1/search', { q: String(q) }); };
   R.refresh = function () { return signed('/v1/refresh', {}); };
   R.status = function () { return signed('/v1/status', {}); };
@@ -1430,7 +1470,7 @@ function save(key, val, notify) {
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
 // v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
-const APP_VERSION = '77'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '78'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -1867,6 +1907,11 @@ try {if (localStorage.getItem(CHART_DICT_KEY) != null) clearChartDict();} catch 
 // iPad には名簿を置かない。並走の間は、Mac mini につながらないときだけ、上の予測変換辞書（この端末の中）があればそれを使う。
 // 聞いた答えは画面に出すだけで覚えない（タップして保存した患者は今までどおり）。窓口につなぐ部品は ROSTER-CLIENT（window.HataRoster）
 if (window.HataRoster) window.HataRoster.app = 'oral'; // 鍵の置き場所はアプリごと（歯周検査と同じ住所なので分ける）
+// v78 番号で引く。見つからなければ Mac mini が名簿を取り直し、終わるのを待ってもう一度聞く（初診の方＝当日の受付でどこでもアポに番号を入れた人）
+function nrLookup(no, onWait) {const R = window.HataRoster;return R.lookupFresh ? R.lookupFresh(String(no), onWait) : R.lookup(String(no));}
+const NR_REFRESHING = '名簿にまだいないので、Mac mini が今日の予約を取り直しています（1分ほど）…　急ぐときは手で入れてもかまいません';
+const NR_FAILED = '名簿の取り直しがうまくいきませんでした（Mac mini がどこでもアポから予約を取れませんでした）。手で入れてください';
+const NR_WAITED = '取り直しても名簿にこのカルテ番号の人はいません。どこでもアポの予約にカルテ番号が入っているか確かめるか、手で入れてください';
 function nrToDictItem(x) {return [String(x && x.no || ''), x && x.sei || '', x && x.mei || '', x && x.birth || '', x && x.seiKana || '', x && x.meiKana || '', x && x.sex || ''];}
 function nrErrText(e) {return e && e.kind === 'net' ? '名簿（Mac mini）につながりません（院内の Wi-Fi か確かめてください）' : e && e.message || '名簿（Mac mini）でエラー';}
 function fmtNrAsof(s) {const d = new Date(s);return isNaN(d) ? '' : d.getMonth() + 1 + '/' + d.getDate() + ' ' + d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0') + ' 時点';}
@@ -3024,9 +3069,9 @@ function PatientSelect({ onSelect, selected, flowPage }) {
     const k = normChartNo(raw);
     if (patients.some((p) => normChartNo(p.chartNo) === k)) return; // 登録済みなら一覧に出る
     const timer = setTimeout(() => {
-      window.HataRoster.lookup(raw).then((j) => {
+      nrLookup(raw, () => {if (normChartNo(qRef.current.trim()) === k) setNrHit({ k, refreshing: true });}).then((j) => {
         if (normChartNo(qRef.current.trim()) !== k || normChartNo(j.no) !== k) return; // 打ち直したあとに届いた古い返事は捨てる
-        setNrHit({ k, item: j.found && j.item ? nrToDictItem(j.item) : null, asof: j.asof || '' });
+        setNrHit({ k, item: j.found && j.item ? nrToDictItem(j.item) : null, asof: j.asof || '', waited: !!j.waited, failed: !!j.refresh_failed });
       }, (e) => {if (normChartNo(qRef.current.trim()) === k) setNrHit({ k, err: nrErrText(e) });});
     }, 450);
     return () => clearTimeout(timer);
@@ -3081,6 +3126,8 @@ function PatientSelect({ onSelect, selected, flowPage }) {
     nrPaired && /^[0-9０-９]+$/.test(q.trim()) && !nrHit && !patients.some((p) => normChartNo(p.chartNo) === normChartNo(q)) && /*#__PURE__*/
     React.createElement("p", { className: "text-xs text-gray-400 mb-2" }, "\u540D\u7C3F\uFF08Mac mini\uFF09\u306B\u805E\u3044\u3066\u3044\u307E\u3059\u2026"),
     nrHit && (nrHit.err ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-red-600 mb-2", "data-testid": "nr-quick-msg" }, nrHit.err) :
+    nrHit.refreshing ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mb-2", "data-testid": "nr-quick-msg" }, NR_REFRESHING) :
+    !nrHit.item && nrHit.waited ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mb-2", "data-testid": "nr-quick-msg" }, nrHit.failed ? NR_FAILED : NR_WAITED, "\uFF08", fmtNrAsof(nrHit.asof), "\uFF09") :
     !nrHit.item ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mb-2", "data-testid": "nr-quick-msg" }, "\u540D\u7C3F\u306B\u3053\u306E\u30AB\u30EB\u30C6\u756A\u53F7\u306E\u4EBA\u306F\u3044\u307E\u305B\u3093\uFF08", fmtNrAsof(nrHit.asof), "\uFF09\u3002") : /*#__PURE__*/
     React.createElement("div", { className: "mb-3 rounded-xl border border-indigo-200 bg-indigo-50/50 px-3 py-2.5", "data-testid": "nr-quick" }, /*#__PURE__*/
     React.createElement("div", { className: "text-sm" }, /*#__PURE__*/React.createElement("span", { className: "font-mono text-gray-500 mr-2" }, nrHit.item[0]), /*#__PURE__*/React.createElement("span", { className: "font-medium" }, nrHit.item[1], " ", nrHit.item[2]), /*#__PURE__*/
@@ -3902,19 +3949,19 @@ function PatientForm({ patientId, returnTo }) {
     return [...exact, ...pre].slice(0, 8);
   }, [dict, form.chartNo, dictPicked]);
   // ── 患者名簿（Mac mini）：カルテ番号を打ち終えて少し止まったら、その1人分だけを聞く（新規登録のときだけ） ──
-  const [nr, setNr] = useState({ paired: null, key: '', cand: undefined, err: '', errKind: '', asof: '', stale: false });
+  const [nr, setNr] = useState({ paired: null, key: '', cand: undefined, err: '', errKind: '', asof: '', stale: false, refreshing: false, waited: false, failed: false });
   const chartRef = useRef(form.chartNo);chartRef.current = form.chartNo;
   useEffect(() => {if (existing || !window.HataRoster) return;window.HataRoster.info().then((i) => setNr((s) => ({ ...s, paired: i }))).catch(() => {});}, []);
   useEffect(() => {
     if (existing || !nr.paired || dictPicked) return;
     const raw = form.chartNo,k = normChartNo(raw);
-    setNr((s) => ({ ...s, key: k, cand: undefined, err: '', errKind: '' }));
+    setNr((s) => ({ ...s, key: k, cand: undefined, err: '', errKind: '', refreshing: false, waited: false, failed: false }));
     if (!k) return;
     const timer = setTimeout(() => {
-      window.HataRoster.lookup(String(raw)).then((j) => {
+      nrLookup(raw, () => {setNr((s) => s.key !== k ? s : { ...s, refreshing: true });}).then((j) => {
         if (normChartNo(j.no) !== k || normChartNo(chartRef.current) !== k) return; // 打ち直したあとに届いた古い返事は捨てる
-        setNr((s) => s.key !== k ? s : { ...s, cand: j.found && j.item ? nrToDictItem(j.item) : null, asof: j.asof || '', stale: !!j.stale });
-      }, (e) => {setNr((s) => s.key !== k ? s : { ...s, err: nrErrText(e), errKind: e && e.kind || '', paired: e && e.kind === 'unpaired' ? null : s.paired });});
+        setNr((s) => s.key !== k ? s : { ...s, cand: j.found && j.item ? nrToDictItem(j.item) : null, asof: j.asof || '', stale: !!j.stale, refreshing: false, waited: !!j.waited, failed: !!j.refresh_failed });
+      }, (e) => {setNr((s) => s.key !== k ? s : { ...s, refreshing: false, err: nrErrText(e), errKind: e && e.kind || '', paired: e && e.kind === 'unpaired' ? null : s.paired });});
     }, 450);
     return () => clearTimeout(timer);
   }, [form.chartNo, nr.paired, dictPicked]);
@@ -3972,7 +4019,8 @@ function PatientForm({ patientId, returnTo }) {
     !existing && nr.paired === null && window.HataRoster && /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1" }, "\uD83D\uDCD6 \u8A2D\u5B9A\uFF08\u2699\uFE0F\uFF09\u306E\u300C\u60A3\u8005\u540D\u7C3F\uFF08Mac mini\uFF09\u300D\u3067\u3064\u306A\u3050\u3068\u3001\u30AB\u30EB\u30C6\u756A\u53F7\u3067\u6C0F\u540D\u30FB\u751F\u5E74\u6708\u65E5\u304C\u5165\u308A\u307E\u3059"),
     useNet && !dictPicked && nr.key && (
     nr.err ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-red-600 mt-1.5", "data-testid": "nr-msg" }, nr.err, "\uFF08\u6C0F\u540D\u306F\u624B\u3067\u5165\u308C\u3066\u304F\u3060\u3055\u3044\uFF09") :
-    nr.cand === undefined ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1.5", "data-testid": "nr-msg" }, "\u540D\u7C3F\uFF08Mac mini\uFF09\u306B\u805E\u3044\u3066\u3044\u307E\u3059\u2026") :
+    nr.cand === undefined ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-400 mt-1.5", "data-testid": "nr-msg" }, nr.refreshing ? NR_REFRESHING : '名簿（Mac mini）に聞いています…') :
+    !nr.cand && nr.waited ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mt-1.5", "data-testid": "nr-msg" }, nr.failed ? NR_FAILED : NR_WAITED, "\uFF08", fmtNrAsof(nr.asof), "\uFF09") :
     !nr.cand ? /*#__PURE__*/React.createElement("p", { className: "text-xs text-gray-500 mt-1.5", "data-testid": "nr-msg" }, "\u540D\u7C3F\u306B\u3053\u306E\u30AB\u30EB\u30C6\u756A\u53F7\u306E\u4EBA\u306F\u3044\u307E\u305B\u3093\uFF08", fmtNrAsof(nr.asof), "\uFF09\u3002\u4ECA\u65E5\u306F\u3058\u3081\u3066\u6765\u305F\u65B9\u306A\u3089 ", /*#__PURE__*/React.createElement("button", { type: "button", className: "underline text-indigo-700", onClick: nrRefresh }, "\u540D\u7C3F\u3092\u53D6\u308A\u76F4\u3059")) : /*#__PURE__*/
     React.createElement("div", { className: "mt-2 rounded-xl border border-indigo-200 bg-indigo-50/50 overflow-hidden", "data-testid": "nr-cand" }, /*#__PURE__*/
     React.createElement(TapButton, { onClick: () => applyDictEntry(nr.cand), className: "w-full flex items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-indigo-100" }, /*#__PURE__*/
