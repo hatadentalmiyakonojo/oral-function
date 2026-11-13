@@ -1470,7 +1470,7 @@ function save(key, val, notify) {
 //   - APP_VERSION：利用者に見えるアプリ版（フッター表示・更新案内に使用）。配布のたびに上げる
 // ═══════════════════════════════════════════════
 // v72: 内部の点検項目（セルフテスト）の整理と未使用の関数 computeBMI の削除。動作は変わりません。
-const APP_VERSION = '78'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
+const APP_VERSION = '79'; // ★配布版番号(vNN)。配布のたびに+1するだけ。フッター表示・更新案内・CACHE_VERの元（ビルド時に"v"+これを自動生成）
 const DATA_SCHEMA_VERSION = 3; // 保存データの“形”の版
 const LEGACY_SCHEMA_VERSION = 1; // 版マーカー未保存の既存データは“現行(=1)”とみなし、変換せず印だけ付ける
 // migrations[v] は 版v → v+1 への変換（load,saveを受け取りlocalStorageを書き換える）。
@@ -2106,6 +2106,7 @@ function vaultCheckRestoreData(d) {
 //   ・写真は Mac mini にある分のうち、復元した評価が参照していてこの端末に無いものだけ putPhoto で書き戻す。
 //     この端末にしか無い写真は消さない（clearAllPhotos しない）。
 async function vaultRestore(data, blobs) {
+  if (osWanted()) return { ok: false, message: 'この iPad は Mac mini で記録を共有しているため、復元できません（ほかの iPad の記録まで変わるため）。設定の「🔄 Mac mini で記録を共有」で共有をやめてから復元してください' }; // v79
   const bad = vaultCheckRestoreData(data);
   if (bad) return { ok: false, message: bad };
   const vals = { patients: data.patients, assessments: data.assessments, clinic: data.clinic || {} };
@@ -2170,6 +2171,254 @@ function initVault() {
     getBlob: (id) => getPhoto(id),
     restore: vaultRestore });
 }
+
+// ═══════════════════════════════════════════════
+// Mac mini で記録を共有（v79・2026-11-13）── 歯周検査（v0.16〜）と同じ仕組み。院長が設定画面で「この iPad で共有を始める」
+//   ・置き場＝院内保管庫の /v1/rec/oral（住所と合言葉は院内保管庫の設定 vault.cfg）。1件ずつ版を持つ：oral:p:<患者id>・oral:a:<評価id>・oral:m:clinic
+//   ・端末の保存（localStorage）はこれまでどおり。保存できたら変えた1件を「送る箱」へ→送る→ほかの iPad の変更を受け取る（20秒ごと・開いたとき）
+//   ・別の iPad が先に直していた（409）→ Mac mini に合わせ、この iPad の入力は「控え」に残す（赤い帯・この iPad の入力に戻す／控えを消す）
+//   ・初めて合わせるとき、両方にある記録が違えば updatedAt の新しい方を残す（この iPad の方が新しければ送る）。日時が無ければ控え
+//   ・顔貌写真は /v1/rec/oral/blob/<id>（中身は dataURL の文字のまま）。評価が参照していて Mac mini に無ければ送る・端末に無ければ取る
+//   ・見本の患者（p001〜p003）とその評価は送らない。共有中は「バックアップから復元」「Mac mini から復元」をさせない（ほかの iPad の記録まで変わるため）
+//   ・状態は IndexedDB oralShare/kv（localStorage は github.io の院内アプリで5MBを分け合うため使わない）
+// ═══════════════════════════════════════════════
+const OS_FLAG = 'oral_share';
+const OS_SAMPLE_PIDS = new Set(['p001', 'p002', 'p003']);
+const OS = { st: null, out: null, conf: null, ph: null, loaded: false, busy: false, again: false, timer: null, iv: null, lastOk: null, err: '', edit: {}, applying: false, listeners: new Set(), started: false };
+function osWanted() {try {return localStorage.getItem(OS_FLAG) === '1';} catch (_) {return false;}}
+function osCfg() {try {const c = JSON.parse(localStorage.getItem('vault.cfg') || 'null');return c && typeof c.url === 'string' && c.url && typeof c.token === 'string' && c.token ? c : null;} catch (_) {return null;}}
+function osEnabled() {return !IS_SELFTEST_OS() && osWanted() && !!osCfg();}
+function IS_SELFTEST_OS() {return /[?&]selftest=1/.test(location.search);}
+function osHash(s) {let a = 0x811c9dc5,b = 0x2545f491;for (let i = 0; i < s.length; i++) {const c = s.charCodeAt(i);a = Math.imul(a ^ c, 16777619);b = Math.imul(b ^ c, 2246822507) + c;}return (a >>> 0).toString(36) + (b >>> 0).toString(36) + s.length.toString(36);}
+const osWid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+const OS_COL = { patients: 'p', assessments: 'a' },OS_COLR = { p: 'patients', a: 'assessments' };
+const osKey = (col, id) => 'oral:' + OS_COL[col] + ':' + id;
+const OS_CLINIC = 'oral:m:clinic';
+function osIsSample(col, o) {return !o || (col === 'patients' ? OS_SAMPLE_PIDS.has(o.id) : OS_SAMPLE_PIDS.has(o.patientId));}
+// 送ってよい id か（Mac mini のキーの形 [A-Za-z0-9:_.-]。generateId() は英小文字と数字だけ）
+const osIdOk = (id) => typeof id === 'string' && /^[A-Za-z0-9_.\-]{1,120}$/.test(id);
+// ── 端末の中の状態（IndexedDB oralShare/kv）
+let _osDB = null;
+function osDB() {if (_osDB) return _osDB;_osDB = new Promise((ok, ng) => {try {const q = indexedDB.open('oralShare', 1);q.onupgradeneeded = () => {const db = q.result;if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');};q.onsuccess = () => ok(q.result);q.onerror = () => ng(q.error);} catch (e) {ng(e);}});_osDB.catch(() => {_osDB = null;});return _osDB;}
+async function osKvGet(k) {const db = await osDB();return new Promise((ok, ng) => {const t = db.transaction('kv', 'readonly');const r = t.objectStore('kv').get(k);r.onsuccess = () => ok(r.result);r.onerror = () => ng(r.error);});}
+async function osKvPutAll(obj) {const db = await osDB();return new Promise((ok, ng) => {const t = db.transaction('kv', 'readwrite');const s = t.objectStore('kv');Object.keys(obj).forEach((k) => s.put(obj[k], k));t.oncomplete = () => ok(true);t.onerror = t.onabort = () => ng(t.error || new Error('IndexedDB'));});}
+async function osLoad() {if (OS.loaded) return;const [st, out, conf, ph] = await Promise.all(['st', 'out', 'conf', 'ph'].map(osKvGet));
+  OS.st = st && typeof st === 'object' && st.vers ? st : { epoch: '', seq: 0, vers: {}, hs: {} };
+  OS.out = out && typeof out === 'object' ? out : {};
+  OS.conf = Array.isArray(conf) ? conf : [];
+  OS.ph = ph && typeof ph === 'object' && ph.sent ? ph : { sent: {}, del: [] };
+  OS.loaded = true;}
+async function osSave() {return osKvPutAll({ st: OS.st, out: OS.out, conf: OS.conf, ph: OS.ph });}
+// ── この iPad の記録（キー→送る文字）。見本は入れない。医院設定は保存してあるときだけ
+// 受け取った記録をまとめて入れるあいだ（OS.cache あり）は読み書きを手元の写しで行い、最後に1回だけ保存する（1件ごとに全部を書き直すと遅い）。
+//   まとめて入れる間は await しない＝画面の保存と混ざらない
+function osReadArr(key) {if (OS.cache && OS.cache[key]) return OS.cache[key].arr;
+  const raw = localStorage.getItem(key);let v = [];if (raw != null) {v = JSON.parse(raw);if (!Array.isArray(v)) throw new Error(key + ' の形が違います');}
+  if (OS.cache) OS.cache[key] = { arr: v, dirty: false };return v;}
+function osWriteArr(key, arr) {if (OS.cache) {OS.cache[key] = { arr, dirty: true };return;}localStorage.setItem(key, JSON.stringify(arr));}
+function osBatchFlush() {const c = OS.cache;OS.cache = null;if (!c) return;
+  const prev = {};const keys = ['patients', 'assessments', 'clinic'].filter((k) => c[k] && c[k].dirty);
+  try {keys.forEach((k) => {prev[k] = localStorage.getItem(k);localStorage.setItem(k, k === 'clinic' ? c[k].raw : JSON.stringify(c[k].arr));});}
+  catch (e) {keys.forEach((k) => {try {if (prev[k] !== undefined) {if (prev[k] == null) localStorage.removeItem(k);else localStorage.setItem(k, prev[k]);}} catch (_) {}}); // 途中まで書いた分を戻す
+    const q = e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);throw new Error(q ? 'この iPad の保存容量がいっぱいで、ほかの iPad の記録を入れられません（設定の「ストレージ使用状況」を確かめてください）' : 'この iPad に記録を入れられませんでした');}}
+function osLocalMap() {const m = new Map();
+  for (const col of ['patients', 'assessments']) osReadArr(col).forEach((o) => {if (o && osIdOk(o.id) && !osIsSample(col, o)) m.set(osKey(col, o.id), JSON.stringify(o));});
+  const c = OS.cache && OS.cache.clinic ? OS.cache.clinic.raw : localStorage.getItem('clinic');if (c != null) m.set(OS_CLINIC, c);
+  return m;}
+function osLocalVal(key) {if (key === OS_CLINIC) return OS.cache && OS.cache.clinic ? OS.cache.clinic.raw : localStorage.getItem('clinic');
+  const m = /^oral:([pa]):(.+)$/.exec(key);if (!m) return null;const col = OS_COLR[m[1]];
+  const o = osReadArr(col).find((x) => x && x.id === m[2]);return o && !osIsSample(col, o) ? JSON.stringify(o) : null;}
+// 編集の画面を開いたときの Mac mini の版（保存したらこの版で確かめる＝開いている間に別の iPad が直した分を黙って上書きしない）
+function osEditMark(col, id) {try {if (OS.st && id != null) OS.edit[osKey(col, id)] = OS.st.vers[osKey(col, id)] || 0;} catch (_) {}}
+function osQueue(key, val) {const h = val == null ? '' : osHash(val);const prev = OS.out[key];
+  const mark = Object.prototype.hasOwnProperty.call(OS.edit, key) ? OS.edit[key] : null;delete OS.edit[key];
+  if (!prev && mark == null && (OS.st.hs[key] || '') === h && (val != null || OS.st.vers[key])) return; // Mac mini と同じ
+  if (val == null && !prev && !OS.st.vers[key]) return; // Mac mini に無い記録を消した
+  OS.out[key] = { v: val, base: prev ? prev.base : mark != null ? mark : OS.st.vers[key] || 0, wid: osWid(), wids: prev ? (prev.wids || []).concat(prev.wid).slice(-20) : [] };}
+// 共有している iPad なら、合言葉が無い間・つながらない間も送る箱には入れる
+async function osNote(fn) {if (IS_SELFTEST_OS() || !osWanted() || OS.applying) return;try {await osLoad();fn();await osSave();osSoon();} catch (e) {console.warn('共有の送る箱に入れられませんでした', e);}}
+const osNotePut = (col, o) => osNote(() => {if (o && osIdOk(o.id) && !osIsSample(col, o)) osQueue(osKey(col, o.id), JSON.stringify(o));});
+const osNoteDel = (col, ids) => osNote(() => ids.forEach((id) => {if (osIdOk(id)) osQueue(osKey(col, id), null);}));
+const osNoteClinic = (c) => osNote(() => osQueue(OS_CLINIC, JSON.stringify(c)));
+const osNotePhotoDel = (ids) => osNote(() => {(ids || []).forEach((id) => {if (osIdOk(String(id)) && !OS.ph.del.includes(String(id))) OS.ph.del.push(String(id));});});
+// 共有中は全部を置き換える操作をさせない
+function osBlockBulk(what) {if (!osWanted()) return false;window.alert(`この iPad は Mac mini で記録を共有しているため、${what}できません（ほかの iPad の記録まで変わるため）。\n設定の「🔄 Mac mini で記録を共有」で「この iPad の共有をやめる」を押してから${what}してください。`);return true;}
+// ── Mac mini の1件をこの iPad に入れる。戻り値 true＝変わった・false＝同じ・null＝形が違うので入れない・'keep'＝消された患者にこの iPad だけの評価がある
+function osApplyLocal(key, value) {
+  if (key === OS_CLINIC) {
+    if (value == null) return false;
+    let c;try {c = JSON.parse(value);} catch (_) {return null;}if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+    const curC = OS.cache && OS.cache.clinic ? OS.cache.clinic.raw : localStorage.getItem('clinic');
+    if (curC === value) return false;
+    if (OS.cache) OS.cache.clinic = { raw: value, dirty: true };else localStorage.setItem('clinic', value);return true;}
+  const m = /^oral:([pa]):(.+)$/.exec(key);if (!m) return null;const col = OS_COLR[m[1]],id = m[2];
+  let o = null;if (value != null) {try {o = JSON.parse(value);} catch (_) {return null;}if (!o || typeof o !== 'object' || Array.isArray(o) || o.id !== id) return null;
+    if (col === 'assessments' && (typeof o.patientId !== 'string' || o.photos != null && !Array.isArray(o.photos))) return null;}
+  const arr = osReadArr(col);const i = arr.findIndex((x) => x && x.id === id);
+  if (o == null) {
+    if (i < 0) return false;
+    if (col === 'patients') {// この患者の評価がまだ残っていれば（別の iPad で行き違いに足された・この iPad だけの評価）、患者を消さずに送り直す
+      // 消すときは評価の消した印が先に届く（送る順・キーの並び＝oral:a が oral:p より前）ので、ふつうの削除では残らない
+      if (osReadArr('assessments').some((a) => a && a.patientId === id)) return 'keep';}
+    const gone = arr[i];arr.splice(i, 1);osWriteArr(col, arr);
+    if (col === 'assessments') osDropPhotos((gone && gone.photos || []).map((p) => p && p.id));
+    return true;}
+  if (i >= 0) {if (JSON.stringify(arr[i]) === value) return false;
+    if (col === 'assessments') {const now = new Set((o.photos || []).map((p) => p && p.id));osDropPhotos((arr[i].photos || []).map((p) => p && p.id).filter((x) => !now.has(x)));}
+    arr[i] = o;} else
+  arr.push(o);
+  osWriteArr(col, arr);return true;}
+// ほかの iPad で外した写真を、この端末からも消す（どの評価も参照していないものだけ）
+function osDropPhotos(ids) {ids = (ids || []).filter(Boolean);if (!ids.length) return;
+  setTimeout(() => {try {const refs = new Set();osReadArr('assessments').forEach((a) => (a && a.photos || []).forEach((p) => {if (p && p.id) refs.add(p.id);}));
+      (OS.conf || []).forEach((x) => {try {const o = JSON.parse(x.mine || 'null');(o && o.photos || []).forEach((p) => {if (p && p.id) refs.add(p.id);});} catch (_) {}}); // 控え（この iPad の入力）が使う写真は残す
+      const del = ids.filter((id) => !refs.has(id));if (del.length) deletePhotos(del).catch(() => {});} catch (_) {}}, 0);}
+function osApply(key, value) {
+  if (_vaultRestoring) throw new Error('Mac mini から復元している最中です');
+  OS.applying = true;
+  try {return osApplyLocal(key, value);}
+  catch (e) {const q = e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);throw new Error(q ? 'この iPad の保存容量がいっぱいで、ほかの iPad の記録を入れられません' : 'この iPad に記録を入れられませんでした（' + (e && e.message || e) + '）');} finally
+  {OS.applying = false;}}
+function osKeepConflict(key, mine, theirs) {OS.conf.unshift({ key, mine, theirs, at: new Date().toISOString() });}
+// 初めて合わせる記録で、両方にあって中身が違う：updatedAt の新しい方。'srv'＝Mac mini・'mine'＝この iPad・'both'＝分からないので控え
+function osFirstPick(key, lv, sv) {
+  let l = null,s = null;try {l = JSON.parse(lv);} catch (_) {}try {s = JSON.parse(sv);} catch (_) {}
+  if (key === OS_CLINIC && l && typeof l === 'object' && !l.updatedAt) {
+    const empty = !(l.name || l.address || l.phone || l.logo || l.doctor) && !(l.doctors || []).length && !(l.hygienists || []).length;
+    if (empty) return 'srv';}
+  const lu = l && l.updatedAt,su = s && s.updatedAt;
+  if (lu && su) return lu > su ? 'mine' : 'srv';
+  return 'both';}
+async function osFetch(url, opt) {const ac = typeof AbortController === 'function' ? new AbortController() : null;const t = ac ? setTimeout(() => ac.abort(), 20000) : null;
+  try {return await fetch(url, Object.assign({ cache: 'no-store' }, opt || {}, ac ? { signal: ac.signal } : {}));} finally {if (t) clearTimeout(t);}}
+// ── 送る・受け取る
+async function osSync() {
+  if (!osEnabled()) return;if (OS.busy) {OS.again = true;return;}
+  OS.busy = true;let changed = false;
+  try {
+    await osLoad();const c = osCfg();const base = c.url.replace(/\/+$/, '') + '/v1/rec/oral';const H = { 'Authorization': 'Bearer ' + c.token };
+    // 開いて最初の1回は全部を突き合わせる（保存した直後に閉じて送る箱に入らなかった変更も、ここで見つけて送る）
+    if (!OS.fullOnce) {OS.fullOnce = true;OS.st.epoch = '';}
+    const pushAll = async () => {
+      let n = 0;
+      // 送る順：患者を足す→評価を足す→評価を消す→患者を消す（受け取る側で、消した患者の評価が残って患者が復活しないように）
+      const rank = (k) => {const o = OS.out[k];const del = o && o.v == null;const pa = /^oral:p:/.test(k);return del ? pa ? 3 : 2 : pa ? 0 : 1;};
+      for (const key of Object.keys(OS.out).sort((x, y) => rank(x) - rank(y))) {let o = OS.out[key];if (!o) continue;
+        for (let tries = 0; tries < 3; tries++) {o = OS.out[key];if (!o) break;
+          const r = await osFetch(base + '/' + encodeURIComponent(key), { method: 'PUT', headers: Object.assign({ 'Content-Type': 'application/json' }, H), body: JSON.stringify({ value: o.v, ver: o.base, wid: o.wid, by: String(c.device || '').slice(0, 40) }) });
+          let j = {};try {j = await r.json();} catch (_) {}
+          if (r.status === 401 || r.status === 429) throw new Error(j.error || '合言葉が違います（院内保管庫の設定を確かめてください）');
+          if (r.status === 409 && j.wid && (o.wids || []).includes(j.wid)) {o.base = j.ver;continue;} // 返事が消えた自分の前の書き込み
+          if (r.status === 409 && j.ver === 0 && j.value == null && o.base > 0) {o.base = 0;continue;} // 置き場が作り直されていた
+          if (r.status === 200 || r.status === 409) {
+            const same = r.status === 200 || (j.value == null ? o.v == null : o.v != null && osHash(j.value) === osHash(o.v));const cur = OS.out[key];
+            if (same) {OS.st.vers[key] = j.ver;OS.st.hs[key] = o.v == null ? '' : osHash(o.v);if (cur === o) delete OS.out[key];else if (cur) {cur.base = j.ver;cur.wids = (cur.wids || []).concat(o.wid);}} else
+            {// 別の iPad が先に直していた：Mac mini に合わせ、この iPad の入力は控える
+              const res = osApply(key, j.value);
+              if (res === 'keep') {o.base = j.ver;continue;}
+              osKeepConflict(key, cur ? cur.v : o.v, j.value);delete OS.out[key];if (res) {osAfterRemote();}
+              if (res !== null) {OS.st.vers[key] = j.ver;OS.st.hs[key] = j.value == null ? '' : osHash(j.value);}}
+            if (++n % 25 === 0) {await osSave();osNotify();}break;} // 送っている間も「送る記録 ○件」を減らして見せる
+          if (r.status === 400 || r.status === 413) {o.err = j && j.error || '受け付けませんでした（' + r.status + '）';break;} // この1件だけ
+          throw new Error(j && j.error || 'Mac mini が受け付けませんでした（' + r.status + '）');}}
+      await osSave();};
+    await pushAll();
+    // ほかの iPad が直した分を受け取る（初めて・Mac mini が起動し直したときは全部）
+    const q = OS.st.epoch ? '?since=' + OS.st.seq + '&epoch=' + encodeURIComponent(OS.st.epoch) : '';
+    const r = await osFetch(base + q, { headers: H });let j = {};try {j = await r.json();} catch (_) {}
+    if (r.status === 401 || r.status === 429) throw new Error(j.error || '合言葉が違います');if (r.status !== 200 || !j.ok) throw new Error(j && j.error || 'Mac mini から読めませんでした（' + r.status + '）');
+    const items = (j.full ? j.docs : j.changes) || [];const seen = new Set();
+    OS.cache = {}; // ここから osBatchFlush まで await しない
+    const stBefore = JSON.stringify({ vers: OS.st.vers, hs: OS.st.hs }); // 入れきれなかったら版を元に戻す（古い中身を「この iPad の入力」と取り違えて送り返さない）
+    try {
+      const local = j.full ? osLocalMap() : null;
+      for (const it of items) {if (!it || typeof it.key !== 'string' || !/^oral:/.test(it.key)) continue;seen.add(it.key);
+        if (OS.out[it.key]) continue; // まだ送っていない入力がある記録は、送るときに版で確かめる
+        if (!j.full && (OS.st.vers[it.key] || 0) >= it.ver) continue; // 自分が送った分
+        const h = it.value == null ? '' : osHash(it.value);const lv = local ? local.has(it.key) ? local.get(it.key) : null : osLocalVal(it.key);
+        if (lv != null && it.value != null && lv === it.value) {OS.st.vers[it.key] = it.ver;OS.st.hs[it.key] = h;continue;}
+        if (lv != null && OS.st.hs[it.key] !== osHash(lv)) {
+          const known = Object.prototype.hasOwnProperty.call(OS.st.hs, it.key);
+          if (known && OS.st.vers[it.key] && it.ver === OS.st.vers[it.key]) {OS.out[it.key] = { v: lv, base: it.ver, wid: osWid(), wids: [] };continue;} // Mac mini は前のまま＝この iPad の入力を送る
+          if (!known && it.value != null) {const pick = osFirstPick(it.key, lv, it.value);
+            if (pick === 'mine') {OS.out[it.key] = { v: lv, base: it.ver, wid: osWid(), wids: [] };continue;}
+            if (pick === 'both') osKeepConflict(it.key, lv, it.value);} else
+          osKeepConflict(it.key, lv, it.value);} // 両方で変わっていた：Mac mini に合わせ、この iPad の分を控える
+        const res = osApply(it.key, it.value);
+        if (res === 'keep') {OS.out[it.key] = { v: lv, base: it.ver, wid: osWid(), wids: [] };continue;}
+        if (res === null) continue; // 形が違う記録は入れず、版も覚えない
+        if (res) changed = true;OS.st.vers[it.key] = it.ver;OS.st.hs[it.key] = h;}
+      if (j.full) OS.ph.sent = {}; // 全部読み直したとき（開いたとき・置き場の作り直し）は写真も Mac mini の一覧で確かめ直す
+      if (j.full) {// この iPad にあって Mac mini に無い記録（はじめての共有・置き場の作り直し）は送る
+        Object.keys(OS.st.vers).forEach((k) => {if (!seen.has(k)) {delete OS.st.vers[k];delete OS.st.hs[k];}});
+        const now = osLocalMap();now.forEach((v, k) => {if (!seen.has(k) && !OS.out[k]) OS.out[k] = { v, base: 0, wid: osWid(), wids: [] };});}
+      osBatchFlush();
+    } catch (e) {OS.cache = null;const b = JSON.parse(stBefore);OS.st.vers = b.vers;OS.st.hs = b.hs;OS.st.epoch = '';throw e;} // 入れきれなかった：版を戻し、次は全部を読み直して合わせ直す
+    if (changed) {osAfterRemote();changed = false;} // 画面の一覧をすぐ読み直す（写真を待たない＝古い一覧のまま編集を始めない）
+    OS.st.epoch = j.epoch || '';OS.st.seq = j.seq || 0;await osSave();
+    if (Object.values(OS.out).some((o) => o && !o.err)) await pushAll();
+    await osSyncPhotos(c, base, H);
+    OS.lastOk = Date.now();OS.st.okAt = OS.lastOk;OS.err = '';await osSave();
+    if (Object.values(OS.out).some((o) => o && !o.err)) OS.again = true;
+  } catch (e) {OS.err = e && e.name === 'AbortError' ? 'Mac mini から返事がありません' : e && e.message && !/fetch|network|Load failed/i.test(e.message) ? e.message : 'Mac mini に届きません（院内Wi-Fi・Mac mini の電源を確認）';} finally
+  {OS.busy = false;if (changed) osAfterRemote();osNotify();if (OS.again) {OS.again = false;if (!OS.err) osSoon(300);}}}
+// ── 写真：評価が参照していて Mac mini に無ければ送る・この端末に無ければ取る・消した写真は Mac mini でもゴミ箱へ
+async function osSyncPhotos(c, base, H) {
+  const refs = new Set();osReadArr('assessments').forEach((a) => {if (!osIsSample('assessments', a)) (a && a.photos || []).forEach((p) => {if (p && osIdOk(String(p.id))) refs.add(String(p.id));});});
+  const del = (OS.ph.del || []).filter((id) => !refs.has(id));
+  for (const id of del) {const r = await osFetch(base + '/blob/' + encodeURIComponent(id), { method: 'DELETE', headers: H });if (r.status === 200 || r.status === 404 || r.status === 400) {OS.ph.del = OS.ph.del.filter((x) => x !== id);delete OS.ph.sent[id];}}
+  OS.ph.del = (OS.ph.del || []).filter((id) => !refs.has(id));
+  if (!refs.size) return;
+  let have = new Set();try {have = new Set((await listPhotoIds()).map(String));} catch (_) {}
+  const needUp = [...refs].filter((id) => have.has(id) && !OS.ph.sent[id]);const needDown = [...refs].filter((id) => !have.has(id));
+  if (!needUp.length && !needDown.length) return;
+  const r = await osFetch(base + '/blobs', { headers: H });let j = {};try {j = await r.json();} catch (_) {}
+  if (r.status !== 200 || !j.ok) throw new Error(j && j.error || 'Mac mini の写真の一覧を読めませんでした');
+  const srv = new Set((j.blobs || []).map((b) => String(b.id)));
+  for (const id of needUp) {
+    if (srv.has(id)) {OS.ph.sent[id] = 1;continue;}
+    const d = await getPhoto(id);if (typeof d !== 'string' || !/^data:image\//.test(d)) continue;
+    const pr = await osFetch(base + '/blob/' + encodeURIComponent(id), { method: 'PUT', headers: Object.assign({ 'Content-Type': 'text/plain' }, H), body: d });
+    if (pr.status === 200) OS.ph.sent[id] = 1;else if (pr.status === 401 || pr.status === 429) throw new Error('合言葉が違います');}
+  let got = 0;
+  for (const id of needDown) {if (!srv.has(id)) continue;
+    const gr = await osFetch(base + '/blob/' + encodeURIComponent(id), { headers: H });if (gr.status !== 200) continue;
+    const d = await gr.text();if (!/^data:image\//.test(d)) continue;
+    await putPhoto(id, d);OS.ph.sent[id] = 1;got++;}
+  if (got) {try {window.dispatchEvent(new Event('oral-share-photos'));} catch (_) {}}}
+function osAfterRemote() {try {window.dispatchEvent(new Event('oral-share-applied'));} catch (_) {}try {vaultDirty();} catch (_) {}}
+function osNotify() {OS.listeners.forEach((f) => {try {f();} catch (_) {}});}
+function osSoon(ms) {clearTimeout(OS.timer);OS.timer = setTimeout(osSync, ms == null ? 1200 : ms);}
+function osStart() {if (OS.started || IS_SELFTEST_OS()) return;OS.started = true;
+  osLoad().then(osNotify, () => {}); // 編集の画面を開く前に版を読んでおく
+  OS.iv = setInterval(() => {if (osEnabled() && document.visibilityState !== 'hidden') osSync();}, 20000);
+  document.addEventListener('visibilitychange', () => {if (document.visibilityState === 'visible' && osEnabled()) osSync();});
+  window.addEventListener('online', () => {if (osEnabled()) osSync();});
+  if (osEnabled()) osSoon(400);}
+async function osTurnOn() {
+  if (!osCfg()) {window.alert('先に、この画面の「🖥 Mac mini への自動バックアップ」で Mac mini の住所と合言葉を設定してください。');return false;}
+  let np = 0,na = 0;try {np = osReadArr('patients').filter((p) => !osIsSample('patients', p)).length;na = osReadArr('assessments').filter((a) => !osIsSample('assessments', a)).length;} catch (e) {window.alert('この iPad の記録を読めないため始められません：' + e.message);return false;}
+  if (!window.confirm(`この iPad の記録（患者 ${np}人・評価 ${na}件。見本は除く）を Mac mini の記録と合わせます。\n・Mac mini に無い記録は送ります\n・Mac mini にある記録はこの iPad に入ります（両方にあって違う記録は、新しく直した方を残します）\nよろしいですか？`)) return false;
+  try {localStorage.setItem(OS_FLAG, '1');} catch (_) {}
+  await osLoad();OS.st.epoch = '';OS.err = '';await osSave();osStart();osSync();osNotify();return true;}
+function osTurnOff() {if (!window.confirm('この iPad の共有をやめます（この iPad の記録は残ります。Mac mini の記録も消しません）。よろしいですか？')) return false;
+  try {localStorage.setItem(OS_FLAG, '0');} catch (_) {}osNotify();return true;}
+async function osUseMine(i) {const x = OS.conf[i];if (!x || x.mine == null) return;
+  let res;try {res = osApply(x.key, x.mine);} catch (e) {window.alert(e.message);return;}if (res === null) {window.alert('この控えは形が違うため戻せません');return;}
+  try {const o = JSON.parse(x.mine);(o && o.photos || []).forEach((p) => {if (p && p.id) delete OS.ph.sent[String(p.id)];});} catch (_) {} // 写真も送り直す
+  OS.out[x.key] = { v: x.mine, base: OS.st.vers[x.key] || 0, wid: osWid(), wids: [] };OS.conf.splice(i, 1);await osSave();osAfterRemote();osNotify();osSync();}
+async function osDropConf(i) {if (!OS.conf[i]) return;OS.conf.splice(i, 1);await osSave();osNotify();}
+function osConfLabel(x) {let o = null;try {o = JSON.parse(x.mine || x.theirs || 'null');} catch (_) {}
+  if (x.key === OS_CLINIC) return '医院設定（医院名・担当者）';
+  if (/^oral:p:/.test(x.key)) return '患者「' + (o && o.name || '?') + '」';
+  if (/^oral:a:/.test(x.key)) {let pn = '';try {const p = osReadArr('patients').find((p) => o && p.id === o.patientId);pn = p ? p.name : '';} catch (_) {}return '評価（' + (pn || '患者?') + '・' + (o && o.date || '').slice(0, 10) + '）';}
+  return x.key;}
+function osStatusText() {if (!osWanted()) return '共有していません';
+  if (!osCfg()) return '⚠ 院内保管庫の住所と合言葉がありません';
+  const n = Object.values(OS.out || {}).filter((o) => o && !o.err).length,bad = Object.values(OS.out || {}).filter((o) => o && o.err).length;
+  if (OS.err) return '⚠ ' + OS.err + (n ? `（送る記録 ${n}件を控えています）` : '');
+  const t = OS.lastOk ? new Date(OS.lastOk).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '';
+  return (OS.busy && !OS.lastOk ? 'Mac mini と合わせています…' : '✓ Mac mini と共有中' + (t ? '（' + t + ' に合わせました）' : '')) + (n ? `・送る記録 ${n}件` : '') + (bad ? `・受け付けられなかった記録 ${bad}件` : '');}
 
 // ═══════════════════════════════════════════════
 // DATA: C-ITEMS (小児) ── JADS「口腔機能発達不全症に関する基本的な考え方」令和6年3月 準拠
@@ -2853,42 +3102,53 @@ function useStore() {
 
   // 差分バックアップ用：保存時にupdatedAtを刻む／削除はtombstoneに記録
   const stamp = (o) => ({ ...o, updatedAt: new Date().toISOString() });
+  // v79: 今の保存（localStorage）を元に直す。Mac mini から届いた記録が画面の一覧より先に保存へ入っていても消さないため
+  const curP = () => {try {const raw = localStorage.getItem('patients');if (raw == null) return patients;const v = JSON.parse(raw);return Array.isArray(v) ? v : patients;} catch (_) {return patients;}}; // 保存が無いときだけ画面の一覧（見本）
+  const curA = () => {try {const v = JSON.parse(localStorage.getItem('assessments') || 'null');return Array.isArray(v) ? v : assessments;} catch (_) {return assessments;}};
+  // v79: ほかの iPad の変更が Mac mini から届いたら、画面の一覧を保存から読み直す
+  useEffect(() => {const f = () => {const v = load('patients', []);setPatients(v.length > 0 ? v : SAMPLE_PATIENTS);setAssessments(load('assessments', []));
+      setClinicState(load('clinic', { name: '', logo: '', doctor: '', address: '', phone: '', doctors: [], hygienists: [] }));};
+    window.addEventListener('oral-share-applied', f);return () => window.removeEventListener('oral-share-applied', f);}, []);
   const addTombstone = (t, id) => {const ts = load('pendingTombstones', []) || [];ts.push({ t, id, at: new Date().toISOString() });save('pendingTombstones', ts);};
   // v70: 保存が成功してから画面の一覧に反映（以前は失敗しても一覧に出て、読み直すと消えていた）
-  const addPatient = (p) => {const x = stamp(p);const n = [...patients, x];const ok = save('patients', n, true);if (ok) setPatients(n);return ok;};
-  const updatePatient = (p) => {const x = stamp(p);const n = patients.map((o) => o.id === x.id ? x : o);const ok = save('patients', n, true);if (ok) setPatients(n);return ok;};
+  const addPatient = (p) => {const x = stamp(p);const n = [...curP(), x];const ok = save('patients', n, true);if (ok) {setPatients(n);osNotePut('patients', x);}return ok;};
+  const updatePatient = (p) => {const x = stamp(p);const n = curP().map((o) => o.id === x.id ? x : o);const ok = save('patients', n, true);if (ok) {setPatients(n);osNotePut('patients', x);}return ok;};
   // v71: 削除は「保存に成功してから」写真を消す（以前は保存の成否を見る前に写真を消していたため、
   //      保存に失敗すると記録は残るのに写真だけ消えた）。評価→患者の順に保存し、失敗したら元に戻す
   const deletePatient = (id) => {
-    const photoIds = assessments.filter((x) => x.patientId === id).flatMap((x) => (x.photos || []).map((p) => p.id));
-    const removed = assessments.filter((x) => x.patientId === id);
-    const a = assessments.filter((x) => x.patientId !== id);
-    const n = patients.filter((x) => x.id !== id);
+    const A0 = curA(),P0 = curP();
+    const photoIds = A0.filter((x) => x.patientId === id).flatMap((x) => (x.photos || []).map((p) => p.id));
+    const removed = A0.filter((x) => x.patientId === id);
+    const a = A0.filter((x) => x.patientId !== id);
+    const n = P0.filter((x) => x.id !== id);
     if (!save('assessments', a, true)) return false;
-    if (!save('patients', n, true)) {save('assessments', assessments);return false;}
+    if (!save('patients', n, true)) {save('assessments', A0);return false;}
     setAssessments(a);setPatients(n);
     addTombstone('patient', id);removed.forEach((r) => addTombstone('assessment', r.id));
+    osNoteDel('assessments', removed.map((r) => r.id));osNoteDel('patients', [id]);osNotePhotoDel(photoIds); // v79: Mac mini の共有でも消す
     if (photoIds.length) deletePhotos(photoIds).catch(() => {});
     return true;
   };
   // v66: 保存が成功してから画面の一覧に反映する。先に setAssessments すると、保存失敗後にもう一度
   //       保存した時に「失敗した分」と「やり直した分」が別IDで並び、記録が二重にできていた。
-  const addAssessment = (a) => {const x = stamp(a);const n = [...assessments, x];const ok = save('assessments', n, true);if (ok) setAssessments(n);return ok;};
-  const updateAssessment = (a) => {const x = stamp(a);const n = assessments.map((o) => o.id === x.id ? x : o);const ok = save('assessments', n, true);if (ok) setAssessments(n);return ok;};
+  const addAssessment = (a) => {const x = stamp(a);const n = [...curA(), x];const ok = save('assessments', n, true);if (ok) {setAssessments(n);osNotePut('assessments', x);}return ok;};
+  const updateAssessment = (a) => {const x = stamp(a);const n = curA().map((o) => o.id === x.id ? x : o);const ok = save('assessments', n, true);if (ok) {setAssessments(n);osNotePut('assessments', x);}return ok;};
   const deleteAssessment = (id) => {
-    const tgt = assessments.find((x) => x.id === id);
+    const A0 = curA();
+    const tgt = A0.find((x) => x.id === id);
     const photoIds = tgt ? (tgt.photos || []).map((p) => p.id) : [];
-    const n = assessments.filter((x) => x.id !== id);
+    const n = A0.filter((x) => x.id !== id);
     if (!save('assessments', n, true)) return false; // v71: 保存できてから写真を消す
     setAssessments(n);
     addTombstone('assessment', id);
+    osNoteDel('assessments', [id]);osNotePhotoDel(photoIds); // v79
     if (photoIds.length) deletePhotos(photoIds).catch(() => {});
     return true;
   };
   // v70: 保存の成否を返し、失敗は画面に出す（以前は失敗しても「保存しました ✓」と出ていた）
-  const setClinic = (c) => {const ok = save('clinic', c, true);if (ok) setClinicState(c);return ok;};
+  const setClinic = (c0) => {const c = { ...c0, updatedAt: new Date().toISOString() };const ok = save('clinic', c, true);if (ok) {setClinicState(c);osNoteClinic(c);}return ok;}; // v79: 直した日時（共有で新しい方を選ぶため）
   const nextNo = () => {
-    const max = patients.reduce((m, p) => Math.max(m, parseInt(p.no.replace('#', '')) || 0), 0);
+    const max = curP().reduce((m, p) => Math.max(m, parseInt(String(p.no || '').replace('#', '')) || 0), 0);
     return '#' + String(max + 1).padStart(4, '0');
   };
   return { patients, assessments, clinic, addPatient, updatePatient, deletePatient, addAssessment, updateAssessment, deleteAssessment, setClinic, nextNo,
@@ -3302,7 +3562,10 @@ function readDraft() {
   const d = load(DRAFT_KEY, null);
   return d && d.v === 1 && (d.kind === 'adult' || d.kind === 'pediatric') && d.pid && d.data && d.token ? d : null;
 }
-function writeDraft(d) {try {localStorage.setItem(DRAFT_KEY, JSON.stringify({ v: 1, at: new Date().toISOString(), ...d }));} catch (e) {}}
+function writeDraft(d) {try {
+    // v79: 共有中は、編集を始めたときの Mac mini の版も控える（続きから再開して保存したとき、その間にほかの iPad が直した分を黙って上書きしない）
+    let osv = null;try {if (d && d.assessmentId && OS.st) {const k = osKey('assessments', d.assessmentId);osv = Object.prototype.hasOwnProperty.call(OS.edit, k) ? OS.edit[k] : OS.st.vers[k] || 0;}} catch (_) {}
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ v: 1, at: new Date().toISOString(), ...d, osv }));} catch (e) {}}
 function clearDraft() {try {localStorage.removeItem(DRAFT_KEY);} catch (e) {}}
 function clearDraftIfMine(token) {const d = readDraft();if (d && d.token === token) clearDraft();}
 
@@ -3364,8 +3627,10 @@ function Home() {
     React.createElement("span", { className: "text-sm flex-1 min-w-[16rem]" }, "\uD83D\uDCDD \u5165\u529B\u9014\u4E2D\u306E\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u3059\uFF1A", draftPatient ? `${draftPatient.name} さん` : '（患者が見つかりません）', "\u30FB", draft.kind === 'adult' ? '口腔機能低下症' : '口腔機能発達不全症', "\uFF08", new Date(draft.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }), "\uFF09", draft.unsavedPhotos ? `　※保存前の顔貌写真${draft.unsavedPhotos}枚は戻りません` : ''),
     draftPatient && /*#__PURE__*/React.createElement("button", { onClick: resumeDraft, className: "flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white bg-amber-600 hover:bg-amber-700" }, "\u7D9A\u304D\u304B\u3089\u518D\u958B"), /*#__PURE__*/
     React.createElement("button", { onClick: discardDraft, className: "flex-shrink-0 text-sm px-3 py-1.5 rounded-lg border border-amber-300 text-amber-800 hover:bg-amber-100" }, "\u7834\u68C4")
-    ),
+    ), /*#__PURE__*/
 
+
+    React.createElement(OralShareBand, null),
     showUpdate ? /*#__PURE__*/
     React.createElement("div", { className: `px-6 py-3 flex items-center gap-3 border-b ${palette.info}` }, /*#__PURE__*/
     React.createElement("span", { className: "text-sm flex-1" }, "\uD83C\uDD95 \u30A2\u30D7\u30EA\u304C\u65B0\u3057\u304F\u306A\u308A\u307E\u3057\u305F\uFF08v", APP_VERSION, "\uFF09\u3002\u5FF5\u306E\u305F\u3081\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u304A\u3059\u3059\u3081\u3057\u307E\u3059\u3002"), /*#__PURE__*/
@@ -3459,9 +3724,65 @@ function RosterNetCard() {
 
 }
 
+// v79: Mac mini で記録を共有（設定画面）。中身は上の OS（osSync ほか）
+function useOsTick() {const [, setT] = useState(0);useEffect(() => {const f = () => setT((t) => t + 1);OS.listeners.add(f);return () => {OS.listeners.delete(f);};}, []);}
+function OralShareCard() {
+  useOsTick();
+  if (IS_SELFTEST_OS()) return null;
+  const on = osWanted();
+  const conf = OS.conf || [];
+  const btn = "px-3 py-2 rounded-xl text-sm font-medium bg-gray-100 hover:bg-gray-200 text-gray-700";
+  const st = osStatusText();
+  return (/*#__PURE__*/
+    React.createElement("div", { className: "bg-white rounded-2xl shadow-sm p-6 space-y-4", "data-testid": "share-card" }, /*#__PURE__*/
+    React.createElement("div", null, /*#__PURE__*/
+    React.createElement("h2", { className: "font-semibold text-gray-800" }, "\uD83D\uDD04 Mac mini \u3067\u8A18\u9332\u3092\u5171\u6709"), /*#__PURE__*/
+    React.createElement("p", { className: "text-xs text-gray-500 mt-1" }, "\u5171\u6709\u3059\u308B\u3068\u3001\u3053\u306E iPad \u3067\u4FDD\u5B58\u3057\u305F\u60A3\u8005\u30FB\u8A55\u4FA1\u30FB\u9854\u8C8C\u5199\u771F\u30FB\u533B\u9662\u8A2D\u5B9A\u304C\u9662\u5185\u306E Mac mini \u306B\u5C4A\u304D\u3001\u307B\u304B\u306E iPad \u3067\u3082\u540C\u3058\u8A18\u9332\u304C\u51FA\u307E\u3059\u3002Wi-Fi \u304C\u5207\u308C\u3066\u3044\u308B\u9593\u3082\u5165\u529B\u3067\u304D\u3001\u3064\u306A\u304C\u3063\u305F\u3089\u9001\u308A\u307E\u3059\u3002\u59CB\u3081\u308B\u306E\u306F\u9662\u9577\u3067\u3059\uFF08\u4E0A\u306E\u300CMac mini \u3078\u306E\u81EA\u52D5\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u300D\u306E\u4F4F\u6240\u3068\u5408\u8A00\u8449\u3092\u4F7F\u3044\u307E\u3059\uFF09\u3002")
+    ), /*#__PURE__*/
+    React.createElement("p", { className: `text-sm ${/⚠/.test(st) ? 'text-red-600' : on ? 'text-green-700' : 'text-gray-600'}`, id: "os-status", "data-testid": "share-status" }, st), /*#__PURE__*/
+    React.createElement("div", { className: "flex flex-wrap gap-2" },
+    on ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/
+    React.createElement(TapButton, { onClick: () => osSync(), className: btn }, "\u4ECA\u3059\u3050\u5408\u308F\u305B\u308B"), /*#__PURE__*/
+    React.createElement(TapButton, { onClick: () => osTurnOff(), className: "px-3 py-2 rounded-xl text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100" }, "\u3053\u306E iPad \u306E\u5171\u6709\u3092\u3084\u3081\u308B")
+    ) : /*#__PURE__*/React.createElement(TapButton, { onClick: () => osTurnOn(), className: "px-4 py-3 rounded-xl font-semibold text-white bg-indigo-600", "data-testid": "share-on" }, "\u3053\u306E iPad \u3067\u5171\u6709\u3092\u59CB\u3081\u308B")
+    ),
+    conf.length > 0 && /*#__PURE__*/
+    React.createElement("div", { className: "border border-red-200 bg-red-50 rounded-xl p-4 space-y-3", "data-testid": "share-conf" }, /*#__PURE__*/
+    React.createElement("p", { className: "text-sm font-semibold text-red-700" }, "\u26A0 \u5225\u306E iPad \u3068\u540C\u6642\u306B\u76F4\u3055\u308C\u305F\u8A18\u9332\u304C ", conf.length, "\u4EF6\u3042\u308A\u307E\u3059\u3002\u753B\u9762\u306B\u306F Mac mini \u306E\u5185\u5BB9\u304C\u5165\u3063\u3066\u3044\u307E\u3059\u3002\u3053\u306E iPad \u3067\u5165\u308C\u305F\u5185\u5BB9\u306F\u63A7\u3048\u306B\u6B8B\u3057\u3066\u3044\u307E\u3059\u3002"),
+    conf.map((x, i) => /*#__PURE__*/
+    React.createElement("div", { key: x.key + x.at, className: "bg-white rounded-lg p-3 space-y-2" }, /*#__PURE__*/
+    React.createElement("p", { className: "text-sm text-gray-800" }, osConfLabel(x), /*#__PURE__*/React.createElement("span", { className: "text-xs text-gray-400 ml-2" }, new Date(x.at).toLocaleString('ja-JP'))), /*#__PURE__*/
+    React.createElement("div", { className: "flex flex-wrap gap-2" },
+    x.mine != null && /*#__PURE__*/React.createElement(TapButton, { onClick: () => {if (window.confirm(osConfLabel(x) + ' を、この iPad で入れた内容に戻して Mac mini にも送ります。よろしいですか？')) osUseMine(i);}, className: btn }, "\u3053\u306E iPad \u306E\u5165\u529B\u306B\u623B\u3059"), /*#__PURE__*/
+    React.createElement(TapButton, { onClick: () => {if (window.confirm('この控えを消します（今の記録は変わりません）。よろしいですか？')) osDropConf(i);}, className: btn }, "\u63A7\u3048\u3092\u6D88\u3059")
+    )
+    ))
+    )
+    ));
+
+}
+
+function OralShareBand() {
+  useOsTick();
+  const nav = useNav();
+  if (IS_SELFTEST_OS() || !osWanted()) return null;
+  const n = (OS.conf || []).length;
+  // 届かないのは10分続いたときだけ知らせる（Wi-Fi の切れ目で毎回出さない）
+  const okAt = OS.lastOk || OS.st && OS.st.okAt || 0;
+  const errShow = !!OS.err && (!okAt || Date.now() - okAt > 10 * 60 * 1000);
+  if (!n && !errShow) return null;
+  return (/*#__PURE__*/
+    React.createElement("div", { className: "no-print px-6 py-3 flex items-center gap-3 border-b bg-red-50 border-red-200 text-red-800", "data-testid": "share-band" }, /*#__PURE__*/
+    React.createElement("span", { className: "text-sm flex-1" }, n ? `⚠ 別の iPad と同時に直された記録が ${n}件あります（この iPad の入力は控えに残しています）。` : `⚠ Mac mini と共有できていません：${OS.err}`), /*#__PURE__*/
+    React.createElement("button", { onClick: () => nav({ p: 'settings' }), className: "flex-shrink-0 text-sm font-semibold px-3 py-1.5 rounded-lg text-white bg-red-600" }, "\u8A2D\u5B9A\u3067\u898B\u308B")
+    ));
+
+}
+
 function Settings() {
   const nav = useNav();
   const { clinic, setClinic, patients, assessments } = useS();
+  useState(() => {try {if (OS.st) OS.edit[OS_CLINIC] = OS.st.vers[OS_CLINIC] || 0;} catch (_) {}return 0;}); // v79: 開いたときの医院設定の版（開いている間にほかの iPad が直した分を黙って上書きしない）
   // 担当者リストは後方互換のため未定義なら空配列扱い
   const [form, setForm] = useState({ doctors: [], hygienists: [], ...clinic });
   const [saved, setSaved] = useState(false);
@@ -3583,6 +3904,7 @@ function Settings() {
   };
   const doImport = () => {
     setMsg(null);
+    if (osBlockBulk('バックアップからの復元・取り込みは')) return; // v79
     if (typeof CryptoJS === 'undefined') {setMsg({ type: 'err', text: '暗号化ライブラリを読み込めていません' });return;}
     if (!impFile) {setMsg({ type: 'err', text: '復元するファイルを選んでください' });return;}
     if (!impPw) {setMsg({ type: 'err', text: 'バックアップのパスワードを入力してください' });return;}
@@ -3774,6 +4096,9 @@ function Settings() {
     vault && /*#__PURE__*/React.createElement("div", { ref: vaultRef }), /*#__PURE__*/
 
 
+    React.createElement(OralShareCard, null), /*#__PURE__*/
+
+
     React.createElement(RosterNetCard, null), /*#__PURE__*/
 
 
@@ -3833,6 +4158,7 @@ function PatientForm({ patientId, returnTo }) {
   const nav = useNav();
   const { patients, addPatient, updatePatient, nextNo } = useS();
   const existing = patientId ? patients.find((p) => p.id === patientId) : null;
+  useState(() => {if (patientId) osEditMark('patients', patientId);return 0;}); // v79
   // 姓・名は分割保存。旧データ（nameのみ）は空白で自動分割して引き継ぐ
   const [exSei, exMei] = existing ? existing.sei != null ? [existing.sei, existing.mei || ''] : splitName(existing.name) : ['', ''];
   const [exSeiK, exMeiK] = existing ? existing.seiKana != null ? [existing.seiKana, existing.meiKana || ''] : splitName(existing.kana) : ['', ''];
@@ -4295,6 +4621,7 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
   // 過去評価の読み込み：assessmentId があれば該当評価を取得して全stateを復元する
   const loaded = assessmentId ? getAssessment(assessmentId) : null;
   const isLoaded = !!loaded; // 過去評価を開いている（新規ではない）
+  useState(() => {if (assessmentId) {if (draft && draft.assessmentId === assessmentId && typeof draft.osv === 'number') OS.edit[osKey('assessments', assessmentId)] = draft.osv;else osEditMark('assessments', assessmentId);}return 0;}); // v79: 開いたとき（続きから再開なら下書きを始めたとき）の Mac mini の版を覚える
   // v62: 再検査モード（3か月ごとの再評価＝舌圧・りっぷるくんだけ入力）。前回の小児記録を引き継いで新しい記録を作る
   const isRetest = mode === 'retest' && !!initPid && !isLoaded;
   const retestBase = isRetest ? assessments.filter((x) => x.patientId === initPid && x.type === 'pediatric').sort((x, y) => new Date(y.date) - new Date(x.date))[0] || null : null;
@@ -4514,7 +4841,7 @@ function PediatricFlow({ patientId: initPid, assessmentId, mode, draft }) {
       (async () => {
         try {
           for (const p of toPut) {await putPhoto(p.id, p.dataURL);}
-          if (toDel.length) await deletePhotos(toDel);
+          if (toDel.length) {await deletePhotos(toDel);osNotePhotoDel(toDel);} // v79: Mac mini の共有からも外す
           setDeletedPhotoIds([]); // 反映済みをクリア
         } catch (e) {alert('写真の保存に一部失敗しました：' + (e && e.message ? e.message : '不明なエラー'));}
       })();
@@ -5121,6 +5448,7 @@ function AdultFlow({ patientId: initPid, assessmentId, mode, draft }) {
   // 過去評価の読み込み：assessmentId があれば該当評価を取得して全stateを復元する
   const loaded = assessmentId ? getAssessment(assessmentId) : null;
   const isLoaded = !!loaded;
+  useState(() => {if (assessmentId) {if (draft && draft.assessmentId === assessmentId && typeof draft.osv === 'number') OS.edit[osKey('assessments', assessmentId)] = draft.osv;else osEditMark('assessments', assessmentId);}return 0;}); // v79: 開いたとき（続きから再開なら下書きを始めたとき）の Mac mini の版を覚える
   // 読込時の measurements を復元（EMPTY_M をベースに上書き）
   //   v56: 3回測定が無い旧データは、保存済みの測定値を1回目に入れ残りは空にする
   //   （EMPTY_Mの既定値が3回欄に残って「測定値と3回欄が食い違う」のを防ぐ。小児のlip3と同じ復元方式）
@@ -6516,6 +6844,8 @@ if (!IS_SELFTEST) {
   // 移行が最後まで済んだときだけ（途中で失敗した形のデータを送らない。次回起動で移行が済めば始まる）
   try {if (load('dataSchemaVersion', null) === DATA_SCHEMA_VERSION) initVault();else console.warn('データの移行が未完了のため院内保管庫を開始しません');}
   catch (e) {console.warn('院内保管庫の初期化に失敗', e);}
+  // v79: Mac mini で記録を共有（院長が設定で始めた iPad だけ）。移行が済んだ実データだけを合わせる
+  try {if (load('dataSchemaVersion', null) === DATA_SCHEMA_VERSION) osStart();} catch (e) {console.warn('共有の開始に失敗', e);}
   // 保存データをiOS等のストレージ自動消去から守るため「永続化」を要求（対応ブラウザのみ・失敗は無視）
   (async () => {try {if (navigator.storage && navigator.storage.persist) {const ok = navigator.storage.persisted ? await navigator.storage.persisted() : false;if (!ok) await navigator.storage.persist();}} catch (e) {}})();
 }
@@ -6899,6 +7229,33 @@ function runSelfTests() {
   tOk('v70: レーダー 測った項目は今までどおり', fsU.find((x) => x.key === 'L-2').measured === true && fsU.find((x) => x.key === 'L-2').score >= 60);
   const fsT = computeFnScores({ measurements: { touched: ['remainingTeeth'], remainingTeeth: '24', biteFilter: true }, checkedLItems: [] });
   t('v70: レーダー 残存歯数だけ測った「かむ力」は測った扱い', fsT.find((x) => x.key === 'L-3').measured, true);
+  // v79: Mac mini で記録を共有（保存には触れない＝写しの OS.cache と仮の OS.st だけで確かめる）
+  {const keep = { st: OS.st, out: OS.out, edit: OS.edit, cache: OS.cache };
+    try {
+      t('v79: 共有 同じ中身なら同じ印・違えば違う印', [osHash('{"a":1}') === osHash('{"a":1}'), osHash('{"a":1}') === osHash('{"a":2}')], [true, false]);
+      t('v79: 共有 見本の患者とその評価は送らない', [osIsSample('patients', { id: 'p001' }), osIsSample('assessments', { id: 'x', patientId: 'p003' }), osIsSample('patients', { id: 'mh3k2abc' })], [true, true, false]);
+      t('v79: 共有 初めて合わせる 新しく直した方を残す', [osFirstPick('oral:p:x', '{"updatedAt":"2026-11-13T10:00"}', '{"updatedAt":"2026-11-12T10:00"}'), osFirstPick('oral:p:x', '{"updatedAt":"2026-11-12T10:00"}', '{"updatedAt":"2026-11-13T10:00"}'), osFirstPick('oral:p:x', '{"a":1}', '{"a":2}')], ['mine', 'srv', 'both']);
+      t('v79: 共有 新しい iPad の空の医院設定は控えにしない', [osFirstPick(OS_CLINIC, '{"name":"","doctors":[],"hygienists":[]}', '{"name":"はた歯科医院"}'), osFirstPick(OS_CLINIC, '{"name":"別の名前"}', '{"name":"はた歯科医院"}')], ['srv', 'both']);
+      t('v79: 共有 送れない id は送らない', [osIdOk('mh3k2abc9'), osIdOk('a/b'), osIdOk(''), osIdOk(12)], [true, false, false, false]);
+      OS.st = { epoch: '', seq: 0, vers: { 'oral:p:k1': 3 }, hs: { 'oral:p:k1': osHash('{"id":"k1"}') } };OS.out = {};OS.edit = {};
+      osQueue('oral:p:k1', '{"id":"k1"}');
+      tOk('v79: 共有 Mac mini と同じ中身は送る箱に入れない', !OS.out['oral:p:k1']);
+      osQueue('oral:p:none', null);
+      tOk('v79: 共有 Mac mini に無い記録を消しても送る物なし', !OS.out['oral:p:none']);
+      OS.edit['oral:p:k1'] = 2;osQueue('oral:p:k1', '{"id":"k1","n":1}');
+      t('v79: 共有 編集の画面を開いた時の版で送る（開いている間の別の iPad の変更を上書きしない）', OS.out['oral:p:k1'].base, 2);
+      OS.cache = { patients: { arr: [{ id: 'k1', name: 'A' }], dirty: false }, assessments: { arr: [{ id: 'a1', patientId: 'k1' }], dirty: false } };
+      t('v79: 共有 届いた患者を足す', [osApplyLocal('oral:p:k2', '{"id":"k2","name":"B"}'), OS.cache.patients.arr.length, OS.cache.patients.dirty], [true, 2, true]);
+      t('v79: 共有 同じ中身なら変えない', osApplyLocal('oral:p:k2', '{"id":"k2","name":"B"}'), false);
+      t('v79: 共有 形の違う記録は入れない', [osApplyLocal('oral:p:k3', '{"id":"zz"}'), osApplyLocal('oral:p:k3', 'こわれた'), osApplyLocal('oral:a:a9', '{"id":"a9"}'), osApplyLocal('oral:x:1', '{}')], [null, null, null, null]);
+      OS.out = { 'oral:a:a1': { v: '{}', base: 0 } };
+      t('v79: 共有 消された患者にこの iPad だけの評価があれば患者を残す', [osApplyLocal('oral:p:k1', null), OS.cache.patients.arr.some((p) => p.id === 'k1')], ['keep', true]);
+      OS.out = {};
+      t('v79: 共有 消された患者を消す', [osApplyLocal('oral:p:k2', null), OS.cache.patients.arr.map((p) => p.id)], [true, ['k1']]);
+      t('v79: 共有 届いた評価を直す', [osApplyLocal('oral:a:a1', '{"id":"a1","patientId":"k1","notes":"x"}'), OS.cache.assessments.arr[0].notes], [true, 'x']);
+    } finally {OS.st = keep.st;OS.out = keep.out;OS.edit = keep.edit;OS.cache = keep.cache;}
+    tOk('v79: 共有 セルフテスト中は共有しない', !osEnabled());
+  }
   return R;
 }
 function renderSelfTests() {
